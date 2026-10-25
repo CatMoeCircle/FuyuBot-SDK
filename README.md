@@ -1,8 +1,8 @@
 # FuyuBot SDK
 
 插件作者的工具箱：插件 ABI 的安全包装、Python / JS / TS 脚本桥、以及开发 CLI `fuyubot-sdk`。
-运行时本体在 [Fuyu-Bot](https://github.com/xiaoqvan/Fuyu-Bot)，文档站在
-[FuyuBot-Docs](https://github.com/xiaoqvan/FuyuBot-Docs)。
+运行时本体在 [Fuyu-Bot](https://github.com/CatMoeCircle/Fuyu-Bot)，文档站在
+[FuyuBot-Docs](https://github.com/CatMoeCircle/FuyuBot-Docs)。
 
 ## crate
 

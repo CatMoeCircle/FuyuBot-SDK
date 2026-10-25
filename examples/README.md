@@ -20,7 +20,7 @@
 ## 编译（Windows，实际用过的命令）
 
 ```powershell
-# 运行时二进制从 https://github.com/xiaoqvan/Fuyu-Bot/releases 取，或本地编。
+# 运行时二进制从 https://github.com/CatMoeCircle/Fuyu-Bot/releases 取，或本地编。
 cargo build -p fuyubot-example-echo    --target-dir examples\rust-echo\target
 cargo build -p fuyubot-example-weather --target-dir examples\python-weather\target
 cargo build -p fuyubot-example-counter --target-dir examples\ts-counter\target

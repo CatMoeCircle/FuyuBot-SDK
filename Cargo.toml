@@ -9,10 +9,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/xiaoqvan/FuyuBot-SDK"
+repository = "https://github.com/CatMoeCircle/FuyuBot-SDK"
 
 # ⚠️ `fuyubot-abi` / `fuyubot-tdlib-sys` **不在这里**：它们是运行时仓库
-# （https://github.com/xiaoqvan/Fuyu-Bot）的 crate，从 crates.io 拉。
+# （https://github.com/CatMoeCircle/Fuyu-Bot）的 crate，从 crates.io 拉。
 # 发布顺序：bot 仓库先发这两个 → 本仓库才能发 fuyubot-plugin-api / fuyubot-sdk-script。
 [workspace.dependencies]
 fuyubot-abi = "0.1.0"
