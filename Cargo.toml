@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/*", "examples/rust-echo", "examples/python-weather", "examples/ts-counter"]
+# 裸 `cargo build` 只编 SDK crate；示例要 `-p fuyubot-example-*` 或 `--workspace`。
+default-members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xiaoqvan/FuyuBot-SDK"
+
+# ⚠️ `fuyubot-abi` / `fuyubot-tdlib-sys` **不在这里**：它们是运行时仓库
+# （https://github.com/xiaoqvan/Fuyu-Bot）的 crate，从 crates.io 拉。
+# 发布顺序：bot 仓库先发这两个 → 本仓库才能发 fuyubot-plugin-api / fuyubot-sdk-script。
+[workspace.dependencies]
+fuyubot-abi = "0.1.0"
+fuyubot-tdlib-sys = "0.1.0"
+fuyubot-plugin-api = { path = "crates/fuyubot-plugin-api", version = "0.1.0" }
+fuyubot-sdk-script = { path = "crates/fuyubot-sdk-script", version = "0.1.0" }
+fuyubot-sdk-cli = { path = "crates/fuyubot-sdk-cli", version = "0.1.0" }
+
+clap = { version = "4.6.7", features = ["derive"] }
+# 只用来**静态**读动态库的导出符号（`fuyubot-sdk check`）：不加载、不运行。
+object = { version = "0.40.0", default-features = false, features = ["read", "names", "std"] }
+serde_json = "1.0.151"
+
+[profile.debug]
+inherits = "dev"
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

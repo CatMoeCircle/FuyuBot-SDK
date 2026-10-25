@@ -1,0 +1,50 @@
+# 手动发布 SDK crate 到 crates.io。
+#
+# 顺序不能反：`fuyubot-sdk-script` 依赖 `fuyubot-plugin-api`，而这两个都依赖运行时仓库
+# 先发出去的 `fuyubot-abi`（plugin-api）与 `fuyubot-tdlib-sys`（sdk-cli，不在本组）。
+# 所以**先**在 Fuyu-Bot 仓库发 `fuyubot-abi` / `fuyubot-tdlib-sys`，再跑这里。
+#
+# 需要仓库 secret `CARGO_REGISTRY_TOKEN`（crates.io API token）。
+name: publish crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只跑 cargo publish --dry-run（不真正上传）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish fuyubot-plugin-api
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=""
+          [[ "$DRY_RUN" == "true" ]] && args="--dry-run"
+          cargo publish -p fuyubot-plugin-api $args
+
+      # ponytail: 固定等 60s 让 crates.io 索引可见；被卡住再换成轮询 API。
+      - name: Wait for the index
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: sleep 60
+
+      - name: Publish fuyubot-sdk-script
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=""
+          [[ "$DRY_RUN" == "true" ]] && args="--dry-run"
+          cargo publish -p fuyubot-sdk-script $args

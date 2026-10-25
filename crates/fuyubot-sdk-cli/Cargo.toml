@@ -1,0 +1,20 @@
+[package]
+name = "fuyubot-sdk-cli"
+description = "fuyubot-sdk：插件开发 CLI（脚手架 / ABI 绑定 / 静态检查 / TDLib 方法查询）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fuyubot-sdk"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+# 这两个是运行时仓库发布到 crates.io 的 crate（td-methods 只要元数据，不拖加载层）。
+fuyubot-abi.workspace = true
+fuyubot-tdlib-sys.workspace = true
+# `check` 用它在**不加载**插件的前提下读导出符号（规格要求「不加载、不运行」）。
+object.workspace = true

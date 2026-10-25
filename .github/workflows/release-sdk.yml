@@ -1,0 +1,115 @@
+# 发布 fuyubot-sdk 插件开发 CLI：按平台编二进制，整合成各平台一个 zip 挂 Release。
+#
+# 与运行时仓库（Fuyu-Bot）的 release-bot.yml 分工：
+#   那边发 fuyubot + 内置插件 + 该平台 tdjson；**这边只发 fuyubot-sdk**（不需要 tdjson）。
+# 平台集合与运行时一致：Windows / Linux 各 x86_64 + aarch64，macOS 只有 aarch64。
+#
+# 构建依赖 crates.io 上的 fuyubot-abi / fuyubot-tdlib-sys（由运行时仓库发布）。
+name: release sdk
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: package ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: fuyubot-sdk-windows-x86_64
+          - os: windows-11-vs2026-arm
+            asset: fuyubot-sdk-windows-aarch64
+          - os: ubuntu-latest
+            asset: fuyubot-sdk-linux-x86_64
+          - os: ubuntu-24.04-arm
+            asset: fuyubot-sdk-linux-aarch64
+          - os: macos-14
+            asset: fuyubot-sdk-macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # td-methods 的元数据要 td_api.tl：build.rs 会从缓存或 Releases 取。
+      - name: Build fuyubot-sdk
+        shell: bash
+        env:
+          FUYUBOT_TDLIB_VENDORED_CACHE: ${{ github.workspace }}/.tdlib-cache
+        run: cargo build --release -p fuyubot-sdk-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="${{ matrix.asset }}"
+          ext=""
+          case "$asset" in *-windows-*) ext=".exe" ;; esac
+          mkdir -p "dist/$asset"
+          cp "target/release/fuyubot-sdk${ext}" "dist/$asset/"
+          tar -czf "dist/$asset.tar.gz" -C dist "$asset"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}-tarball
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Merge into per-platform zips
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/dist"
+          stage="$(mktemp -d)"
+          for tarball in dist/fuyubot-sdk-*.tar.gz; do
+            asset="$(basename "$tarball" .tar.gz)"
+            tar -xzf "$tarball" -C "$stage"
+            ( cd "$stage" && zip -q -r -X "$out/$asset.zip" "$asset" )
+          done
+          rm -rf "$stage"
+          ls -lh dist/*.zip
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          rows="$(
+            for z in dist/*.zip; do
+              printf '| `%s` |\n' "$(basename "$z")"
+            done
+          )"
+          notes=$(printf '%s\n' \
+            "## 下载" \
+            "" \
+            "插件开发 CLI（不需要 tdjson）：解压后跑 \`fuyubot-sdk --version\`。" \
+            "" \
+            "| 资产 |" \
+            "| --- |" \
+            "$rows")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip --clobber
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" dist/*.zip --title "fuyubot-sdk $TAG" --notes "$notes"
+          fi
