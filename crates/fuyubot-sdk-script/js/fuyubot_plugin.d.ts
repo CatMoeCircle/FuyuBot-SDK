@@ -27,6 +27,39 @@ export type Json =
 /** 事件回调：收到一条事件的负载。 */
 export type Handler = (payload: Json) => void;
 
+/**
+ * **写** TDLib 对象时的宽松类型：判别字段 `@type` 与 `_` **二选一**，递归到任意深度。
+ *
+ * `td_api.d.ts` 里每个 interface 的 `"@type"` 是**必填**判别式——读负载时靠它把联合类型
+ * 窄化（`if (content["@type"] === "messageText")`），所以那边不能松。但**手写**请求时
+ * 每层都要抄一遍 `"@type"`（还带引号），嵌套越深越难读：
+ *
+ * ```ts
+ * host.invoke("sendMessage", {
+ *   chat_id: chatId,
+ *   input_message_content: {
+ *     _: "inputMessageVideo",                              // = "@type"
+ *     video: { _: "inputFileLocal", path: "./video.mp4" },  // 递归到里面
+ *     duration: 120,
+ *   },
+ * });
+ * ```
+ *
+ * 桥在发往宿主之前把 `_` 递归换成 `@type`（同时写了两个时以 `@type` 为准）。
+ * 代价是判别式在这一侧**可有可无**——漏了就是 TDLib 报错，由传输层而不是编译器发现。
+ *
+ * ⚠️ 只用在「作者写出去」的位置（`invoke` 的 params）。回调里读到的负载仍是
+ * `td_api.d.ts` 里那个带必填 `@type` 的判别联合。
+ */
+export type TdInput<T> = T extends readonly (infer U)[]
+  ? readonly TdInput<U>[]
+  : T extends object
+    ? { [K in keyof T as TdInputKey<K>]?: K extends "@type" ? T[K] : TdInput<T[K]> }
+    : T;
+
+/** `@type` 这条键额外接受 `_` 这个别名，其余照原样。 */
+export type TdInputKey<K> = K extends "@type" ? "@type" | "_" : K;
+
 /** 宿主 `HostApiVTable::log`。`level`：error / warn / info / debug / trace。 */
 export declare function log(message: string, level?: string): void;
 
@@ -57,11 +90,13 @@ export declare function off(event: string, handler: Handler): void;
  *
  * 方法名是 `TdFunctionMap` 的键时，`params` 与 `onResponse` 推断为精确类型
  * （参数字段都可省略——TDLib 会给缺省项填默认值，但传了就是精确类型）。
+ *
+ * `params` 里嵌的 TDLib 对象可以写 `_` 当判别字段，见 {@link TdInput}。
  */
 export declare function invoke<M extends string>(
   method: M,
   params?: M extends keyof TdFunctionMap
-    ? TdFunctionMap[M]["params"]
+    ? TdInput<TdFunctionMap[M]["params"]>
     : { [key: string]: Json },
   onResponse?: M extends keyof TdFunctionMap
     ? (response: TdFunctionMap[M]["result"]) => void
@@ -91,6 +126,8 @@ export declare function listTools(onTools?: (tools: Json[]) => void): number;
 /**
  * 宿主 `HostApiVTable::td_execute`：**同步**执行不碰网络的 TDLib 方法。
  * 发消息/编辑消息不能走它。
+ *
+ * `request` 是完整的请求对象，它的判别字段同样可以写 `_`。
  */
 export declare function tdExecute(
   request: { [key: string]: Json },

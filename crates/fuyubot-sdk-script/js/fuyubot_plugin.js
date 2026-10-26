@@ -15,6 +15,20 @@
  *
  * 类型声明见同目录的 `fuyubot_plugin.d.ts`。
  * Node 与 Bun 都跑得起来（宿主会依次尝试 `node`、`bun`）。
+ *
+ * 写 TDLib 对象时判别字段可以写成 `_`，桥会递归换成 `@type`：
+ *
+ *     host.invoke("sendMessage", {
+ *       chat_id: chatId,
+ *       input_message_content: {
+ *         _: "inputMessageVideo",
+ *         video: { _: "inputFileLocal", path: "./video.mp4" },
+ *         duration: 120,
+ *       },
+ *     });
+ *
+ * 宿主转发到 TDLib 的是**原样**的 params，所以这一步必须在 JS 侧做完——
+ * 见 {@link canonicalize}。
  */
 
 const readline = require("readline");
@@ -57,6 +71,49 @@ function newTag() {
   return nextTag++;
 }
 
+/**
+ * 把作者写的 TDLib 字面量规整成宿主（再往下是 TDLib）认的形状：**`_` → `@type`**。
+ *
+ * TDLib 要求每个对象带判别字段。这里约定它可以写成 `_`（短、不用引），效果与
+ * 写 `"@type"` 完全等价，且**递归到任意深度**——`vector<T>` 里那一串对象也生效。
+ *
+ * 三条细节：
+ * - 同时写了 `@type` 与 `_`：**以 `@type` 为准**，`_` 丢掉（作者显式表态优先）；
+ * - 返回**新对象**，不改动传进来的那份——同一个字面量被复用两次不会变样；
+ * - `path` 记的是**当前这条递归链**（进子树前加、出来就删）：同一个对象在两处复用
+ *   照样被规整，而真环（对象引用自己）走进第二次时提前返回，不会把这里拖死。
+ *
+ * 不是 TDLib 对象的地方（`emit` 的自定义负载、`callTool` 的参数）**不**过这一步：
+ * 那里的 `_` 就是普通字段，改了才是 bug。
+ */
+function canonicalize(value, path) {
+  path = path || new Set();
+  if (Array.isArray(value)) {
+    if (path.has(value)) return value;
+    path.add(value);
+    const items = value.map((item) => canonicalize(item, path));
+    path.delete(value);
+    return items;
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (path.has(value)) return value;
+  path.add(value);
+  const out = {};
+  // `@type` 没写才认 `_`；两者都不是字符串时不动它（那 TDLib 会报错，正好是想要的反馈）。
+  const tag = value["@type"] !== undefined ? value["@type"] : value._;
+  if (typeof tag === "string") {
+    out["@type"] = tag;
+  }
+  for (const key of Object.keys(value)) {
+    if (key === "@type" || key === "_") continue;
+    out[key] = canonicalize(value[key], path);
+  }
+  path.delete(value);
+  return out;
+}
+
 /** 往宿主日志里写一行。`level`：error / warn / info / debug / trace。 */
 function log(message, level = "info") {
   send({ op: "log", level, message: String(message) });
@@ -97,6 +154,8 @@ function off(event, handler) {
  *
  * 给了 `onResponse` 就会在这条请求的响应回来时调它——响应按 `request_id`
  * 配对，脚本不用自己记请求号。
+ *
+ * `params` 里嵌的 TDLib 对象可以写 `_` 当判别字段，见 {@link canonicalize}。
  */
 function invoke(method, params, onResponse) {
   ensureResponseChannel();
@@ -104,7 +163,7 @@ function invoke(method, params, onResponse) {
   if (typeof onResponse === "function") {
     pendingInvokes.set(tag, onResponse);
   }
-  send({ op: "invoke", tag, method, params: params || {} });
+  send({ op: "invoke", tag, method, params: canonicalize(params || {}) });
   return tag;
 }
 
@@ -151,13 +210,16 @@ function listTools(onTools) {
 /**
  * **同步**执行一个不碰网络的 TDLib 方法（如 `parseTextEntities`、
  * `getTextEntities`）。`onResult` 收到结果 JSON；发消息/编辑消息**不能**走它。
+ *
+ * `request` 是完整的 TDLib 请求对象，所以它的判别字段也**可以直接写 `_`**
+ * （`tdExecute({ _: "getTextEntities", text: { _: "formattedText", text: "**hi**" } })`）。
  */
 function tdExecute(request, onResult) {
   const tag = newTag();
   if (typeof onResult === "function") {
     pendingReplies.set(tag, (msg) => onResult(msg.result));
   }
-  send({ op: "execute", tag, request });
+  send({ op: "execute", tag, request: canonicalize(request) });
   return tag;
 }
 
@@ -430,7 +492,92 @@ function selfTest() {
   dispatch({ op: "setConfig", tag: st });
   assert(JSON.stringify(seen[seen.length - 1]) === JSON.stringify(["set", "setConfig"]), seen);
 
+  // `_` 当 `@type`：递归到任意深度，vector 里的对象也生效。
+  const content = {
+    _: "inputMessageVideo",
+    video: { _: "inputFileLocal", path: "./video.mp4" },
+    caption: { _: "formattedText", text: "hi" },
+    duration: 120,
+  };
+  const sentInvoke = captureSends(
+    () => invoke("sendMessage", { chat_id: 7, input_message_content: content, album: [content] }),
+    "invoke"
+  );
+  assert(sentInvoke.method === "sendMessage", sentInvoke);
+  assert(
+    JSON.stringify(sentInvoke.params) ===
+      JSON.stringify({
+        chat_id: 7,
+        input_message_content: {
+          "@type": "inputMessageVideo",
+          video: { "@type": "inputFileLocal", path: "./video.mp4" },
+          caption: { "@type": "formattedText", text: "hi" },
+          duration: 120,
+        },
+        album: [
+          {
+            "@type": "inputMessageVideo",
+            video: { "@type": "inputFileLocal", path: "./video.mp4" },
+            caption: { "@type": "formattedText", text: "hi" },
+            duration: 120,
+          },
+        ],
+      }),
+    sentInvoke.params
+  );
+  // 作者传进来的字面量不许被改写（同一个对象常常要复用）。
+  assert(content._ === "inputMessageVideo", "canonicalize 动了作者的对象");
+
+  // 同时写了两个：`@type` 说了算，`_` 丢掉。
+  const sentBoth = captureSends(() => invoke("getMe", { "@type": "getMe", _: "garbage" }), "invoke");
+  assert(JSON.stringify(sentBoth.params) === JSON.stringify({ "@type": "getMe" }), sentBoth.params);
+
+  // tdExecute 的 request 是完整请求对象，它自己也认 `_`。
+  const sentExecute = captureSends(
+    () => tdExecute({ _: "getTextEntities", text: { _: "formattedText", text: "**hi**" } }),
+    "execute"
+  );
+  assert(
+    JSON.stringify(sentExecute.request) ===
+      JSON.stringify({
+        "@type": "getTextEntities",
+        text: { "@type": "formattedText", text: "**hi**" },
+      }),
+    sentExecute.request
+  );
+
+  // 自引用不会把 canonicalize 拖死（第二次遇到同一个对象直接返回；真要发出去，
+  // 炸的是 `JSON.stringify`——那是作者自己的环，桥不管）。
+  const loop = { _: "loop", items: [] };
+  loop.items.push(loop);
+  const cycled = canonicalize(loop);
+  assert(cycled["@type"] === "loop" && cycled.items[0] === loop, cycled);
+
   console.log("fuyubot_plugin: self-test ok");
+}
+
+/**
+ * 拦下 `fn()` 这段时间里发出去的行，返回**第一条**（通常也是唯一一条）指定 `op` 的消息。
+ *
+ * 自检要是 `$_` → `@type` 这类「出去之前被改写」的行为，就得看真正写到管道上的东西。
+ */
+function captureSends(fn, op) {
+  const original = process.stdout.write;
+  const lines = [];
+  process.stdout.write = (text) => {
+    lines.push(String(text));
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    process.stdout.write = original;
+  }
+  const matched = lines
+    .map((line) => JSON.parse(line.trim()))
+    .filter((message) => message.op === op);
+  assert(matched.length === 1, `想要正好一条 op=${op}，实际收到了 ${lines.length} 行：${lines}`);
+  return matched[0];
 }
 
 function assert(condition, detail) {

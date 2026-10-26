@@ -28,12 +28,14 @@ import * as host from "./fuyubot_plugin.js";
 const counts = new Map<number, number>();
 
 /**
- * `payload` 的类型是 `host.Json`（递归联合），取字段前先窄化成对象。
+ * `payload` 取值前先窄化成对象（回调里的是精确类型，不是 `any`）。
  *
- * JS 侧没有 schema，这就是代价：多两行窄化，换掉满地的 `any`。
+ * JS 侧没有运行时 schema，这就是代价：多一个 helper，换掉满地的 `any`。
  */
-function object(value: host.Json): { [key: string]: host.Json } {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+function object(value: unknown): { [key: string]: host.Json } {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as { [key: string]: host.Json })
+    : {};
 }
 
 function text(value: host.Json): string {
@@ -58,9 +60,14 @@ host.on("updateNewMessage", (payload) => {
   counts.set(chatId, count);
 
   host.log(`${chatId} 的第 ${count} 条：${body}`);
+  // TDLib 的 `sendMessage` 没有 `text` 参数——文本在 `input_message_content` 里，
+  // 是它套一层 `inputMessageText`。判别字段写 `_` 就行（桥会递归换成 `@type`）。
   host.invoke("sendMessage", {
     chat_id: chatId,
-    text: `本聊天第 ${count} 条消息`,
+    input_message_content: {
+      _: "inputMessageText",
+      text: { _: "formattedText", text: `本聊天第 ${count} 条消息` },
+    },
   });
 });
 

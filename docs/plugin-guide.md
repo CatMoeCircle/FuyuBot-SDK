@@ -221,6 +221,9 @@ host.run();
 
 - 可用的函数：`log` / `on` / `off` / `invoke` / `emit` / `registerTool` / `config` / `run`。
   类型声明在 `fuyubot_plugin.d.ts`。
+- **`params` / `request` 里嵌的 TDLib 对象，判别字段可以写 `_`**（等价于 `"@type"`）：
+  桥在发往宿主之前递归换回来，嵌套多深、`vector<T>` 里的对象都算。同时写了两个时
+  以 `"@type"` 为准。宿主不会替脚本补判别字段，所以这一步必须在 JS 侧做完。
 - 解释器依次试 `node` / `bun`；`host.run()` 同样必须是最后一行。自检：`node fuyubot_plugin.js`。
 
 ## 6. `--replay`：不接账号也能验插件
