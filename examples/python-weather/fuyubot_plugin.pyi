@@ -56,8 +56,78 @@ def register_tool(
     """宿主 `HostApiVTable::register_tool`（只登记元数据，没有处理器指针）。"""
     ...
 
+def call_tool(
+    name: str,
+    input: Optional[Dict[str, Any]] = None,
+    on_response: Optional[Handler] = None,
+) -> int:
+    """宿主 `HostApiVTable::call_tool`：异步调用一个工具。"""
+    ...
+
+def list_tools(on_tools: Optional[Callable[[List[Any]], None]] = None) -> int:
+    """宿主 `HostApiVTable::list_tools`：同步列出全部工具元数据。"""
+    ...
+
+def td_execute(
+    request: Dict[str, Any],
+    on_result: Optional[Callable[[Json], None]] = None,
+) -> int:
+    """宿主 `HostApiVTable::td_execute`：同步执行不碰网络的 TDLib 方法。"""
+    ...
+
+def use_middleware(
+    stage: int,
+    handler: Callable[[int, Json], None],
+) -> Callable[[int, Json], None]:
+    """宿主 `HostApiVTable::use_middleware`：挂中间件。`stage` 是 0..5 的整数。"""
+    ...
+
+def wait_for_update(
+    filter: Dict[str, Any],
+    timeout_ms: int = 0,
+    on_match: Optional[Callable[[Json], None]] = None,
+) -> int:
+    """宿主 `HostApiVTable::wait_for_update`：阻塞等一条匹配的更新。"""
+    ...
+
+def get_service(
+    name: str,
+    on_service: Optional[Callable[[Optional[Dict[str, Any]]], None]] = None,
+) -> int:
+    """宿主 `HostApiVTable::get_service`：读服务的元数据（名字 + 方法列表）。"""
+    ...
+
+def call_service(
+    name: str,
+    method: str,
+    input: Optional[Dict[str, Any]] = None,
+    on_result: Optional[Callable[[Json], None]] = None,
+) -> int:
+    """同步调用宿主服务的一个方法。"""
+    ...
+
 def config() -> Dict[str, Any]:
-    """宿主传给插件的配置（`plugin_start` 的 config JSON）。"""
+    """宿主传给插件的配置（`plugin_start` 的 config JSON，含 `plugin_config` 键）。"""
+    ...
+
+def plugin_config() -> Dict[str, Any]:
+    """**自己的**配置段（`[plugin.<插件名>]`）。同步、`run()` 之前也能读；没配就是空字典。"""
+    ...
+
+def get_config(
+    section: str,
+    key: str = "",
+    on_config: Optional[Callable[[Optional[Json]], None]] = None,
+) -> int:
+    """读任意插件段（异步，回调在 `run()` 之后）。`section` 空串读顶层，`key` 空串读整段。"""
+    ...
+
+def set_config(
+    key: str,
+    value: Json,
+    on_done: Optional[Callable[[bool], None]] = None,
+) -> int:
+    """写**自己的**配置段（成功后回写 `fuyubot.toml`）。`key` 空串覆盖整段。"""
     ...
 
 def run() -> None:

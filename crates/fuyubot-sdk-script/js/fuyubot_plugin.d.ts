@@ -7,7 +7,13 @@
  *
  * 对应的实现是同目录的 `fuyubot_plugin.js`（CommonJS）；TS 里这样接：
  * `import * as host from "./fuyubot_plugin";`
+ *
+ * `on` / `invoke` 用同目录的 `td_api.d.ts`（由 `fuyubot-sdk td-types` 从
+ * `td_api.tl` 生成）做精确类型：写 `on("updateNewMessage", …)` 时回调参数
+ * 是 `updateNewMessage`，写 `invoke("sendMessage", …)` 时参数是 `sendMessageParams`。
  */
+/// <reference path="./td_api.d.ts" />
+import type { TdUpdateMap, TdFunctionMap } from "./td_api";
 
 /** 负载/回调里能看到的 JSON 值。 */
 export type Json =
@@ -29,10 +35,14 @@ export declare function log(message: string, level?: string): void;
  *
  * `filter` 里的 `event_type` 键选择通道（`"update"` / `"response"`），
  * 其余键做负载字段匹配。
+ *
+ * 事件名是 `TdUpdateMap` 的键时，回调参数推断为精确的负载类型。
  */
-export declare function on(
-  event: string,
-  handler: Handler,
+export declare function on<E extends string>(
+  event: E,
+  handler: E extends keyof TdUpdateMap
+    ? (payload: TdUpdateMap[E]) => void
+    : Handler,
   filter?: { [key: string]: Json },
 ): Handler;
 
@@ -44,11 +54,18 @@ export declare function off(event: string, handler: Handler): void;
  *
  * `method` 是 TDLib 的方法名（如 `"sendMessage"`），`params` 是除 `@type`
  * 之外的参数。返回脚本侧的 tag；给了 `onResponse` 就按 `request_id` 配对回调。
+ *
+ * 方法名是 `TdFunctionMap` 的键时，`params` 与 `onResponse` 推断为精确类型
+ * （参数字段都可省略——TDLib 会给缺省项填默认值，但传了就是精确类型）。
  */
-export declare function invoke(
-  method: string,
-  params?: { [key: string]: Json },
-  onResponse?: Handler,
+export declare function invoke<M extends string>(
+  method: M,
+  params?: M extends keyof TdFunctionMap
+    ? TdFunctionMap[M]["params"]
+    : { [key: string]: Json },
+  onResponse?: M extends keyof TdFunctionMap
+    ? (response: TdFunctionMap[M]["result"]) => void
+    : Handler,
 ): number;
 
 /** 宿主 `HostApiVTable::emit`。 */
@@ -61,8 +78,80 @@ export declare function registerTool(
   inputSchema?: { [key: string]: Json },
 ): void;
 
-/** 宿主传给插件的配置（`plugin_start` 的 config JSON）。 */
+/** 宿主 `HostApiVTable::call_tool`：异步调用一个工具。 */
+export declare function callTool(
+  name: string,
+  input?: { [key: string]: Json },
+  onResponse?: Handler,
+): number;
+
+/** 宿主 `HostApiVTable::list_tools`：同步列出全部工具元数据。 */
+export declare function listTools(onTools?: (tools: Json[]) => void): number;
+
+/**
+ * 宿主 `HostApiVTable::td_execute`：**同步**执行不碰网络的 TDLib 方法。
+ * 发消息/编辑消息不能走它。
+ */
+export declare function tdExecute(
+  request: { [key: string]: Json },
+  onResult?: (result: Json) => void,
+): number;
+
+/**
+ * 宿主 `HostApiVTable::use_middleware`：挂中间件。`stage` 是 0..5 的整数。
+ * `handler(stage, payload)` 在更新经过该阶段时被调用；中间件无法单独注销。
+ */
+export declare function useMiddleware(
+  stage: number,
+  handler: (stage: number, payload: Json) => void,
+): (stage: number, payload: Json) => void;
+
+/** 宿主 `HostApiVTable::wait_for_update`：阻塞等一条匹配的更新。 */
+export declare function waitForUpdate(
+  filter: { [key: string]: Json },
+  timeoutMs: number,
+  onMatch?: (payload: Json) => void,
+): number;
+
+/** 宿主 `HostApiVTable::get_service`：读服务的元数据（名字 + 方法列表）。 */
+export declare function getService(
+  name: string,
+  onService?: (service: { name: string; methods: string[] } | null) => void,
+): number;
+
+/** 同步调用宿主服务的一个方法。 */
+export declare function callService(
+  name: string,
+  method: string,
+  input?: { [key: string]: Json },
+  onResult?: (result: Json) => void,
+): number;
+
+/** 宿主传给插件的配置（`plugin_start` 的 config JSON，含 `plugin_config` 键）。 */
 export declare function config(): { [key: string]: Json };
+
+/** **自己的**配置段（`[plugin.<插件名>]`）。同步、`run()` 之前也能读；没配就是空对象。 */
+export declare function pluginConfig(): { [key: string]: Json };
+
+/**
+ * 读任意插件段（异步，回调在 `run()` 之后）。`section` 空串读顶层，`key` 空串读整段。
+ * 段 / 键不存在时回调收到 `null`。
+ */
+export declare function getConfig(
+  section: string,
+  key?: string,
+  onConfig?: (config: Json) => void,
+): number;
+
+/**
+ * 写**自己的**配置段（成功后回写 `fuyubot.toml`）。`key` 空串覆盖整段。
+ * 失败只会打日志，不会调 `onDone`。
+ */
+export declare function setConfig(
+  key: string,
+  value: Json,
+  onDone?: (ok: boolean) => void,
+): number;
 
 /** 开始读宿主的行并分发。插件的最后一行永远是这个。 */
 export declare function run(): void;

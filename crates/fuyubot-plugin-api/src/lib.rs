@@ -133,6 +133,19 @@ pub trait HostExt {
     ///
     /// 返回 `None` 表示超时或被取消。
     fn wait_for_update_json(&self, filter: Value, timeout_ms: u64) -> Option<Value>;
+
+    /// 读全局配置的一个段 / 键，把宿主的 JSON 缓冲当场解析成 [`Value`]。
+    ///
+    /// `section` 是插件段名（如 `"fuyubot.manage"`，点分插件名会当点路径下钻）；
+    /// 空串读顶层（`[bot]` / `[telegram]` 等）。`key` 空串读整段、否则按点路径取键。
+    /// 段 / 键不存在返回 `None`。
+    fn config_value(&self, section: &str, key: &str) -> Option<Value>;
+
+    /// 写**自己**那一段配置（`[plugin.<本插件名>]`），值先序列化成 JSON。
+    ///
+    /// 宿主按调用者身份判定归属，所以没有 section 参数——插件写不到别人的段。
+    /// 成功 = 已写内存并回写 `fuyubot.toml`。
+    fn set_config_value(&self, key: &str, value: Value) -> Result<(), AbiError>;
 }
 
 impl HostExt for HostApi {
@@ -179,6 +192,15 @@ impl HostExt for HostApi {
         // SAFETY: 宿主保证 payload 在本线程下一次宿主调用前有效——这里立刻拷走。
         Some(unsafe { parse_payload(handle.payload_json) })
     }
+
+    fn config_value(&self, section: &str, key: &str) -> Option<Value> {
+        let text = self.get_config(section, key)?;
+        serde_json::from_str(&text).ok()
+    }
+
+    fn set_config_value(&self, key: &str, value: Value) -> Result<(), AbiError> {
+        self.set_config(key, &value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +222,7 @@ mod tests {
     mod fake_host {
         use super::*;
         use fuyubot_abi::{ABI_VERSION, HostApiVTable, SubscriptionHandle};
+        use std::ffi::CStr;
 
         static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
@@ -274,6 +297,30 @@ mod tests {
             core::ptr::null()
         }
 
+        /// 读配置：返回一份静态 JSON（模拟宿主的线程局部缓冲；测试只关心能不能解析）。
+        unsafe extern "C" fn get_config(
+            _h: *mut c_void,
+            section: *const c_char,
+            key: *const c_char,
+        ) -> *const c_char {
+            // SAFETY: ABI 契约保证是 NUL 结尾字符串。
+            let section = unsafe { CStr::from_ptr(section) }.to_string_lossy();
+            let key = unsafe { CStr::from_ptr(key) }.to_string_lossy();
+            // 只模拟「有这一段」的情形，其余返回 NULL（= 不存在）。
+            if section == "demo" && key.is_empty() {
+                static BODY: &[u8] = b"{\"a\":1}\0";
+                return BODY.as_ptr() as *const c_char;
+            }
+            core::ptr::null()
+        }
+        unsafe extern "C" fn set_config(
+            _h: *mut c_void,
+            _k: *const c_char,
+            _v: *const c_char,
+        ) -> i32 {
+            0
+        }
+
         pub fn api() -> HostApi {
             // 每次调都新建一份静态 VTable：地址稳定，插件侧只读。
             let vtable: &'static HostApiVTable = Box::leak(Box::new(HostApiVTable {
@@ -295,6 +342,8 @@ mod tests {
                 wait_for_update: Some(wait),
                 cancel_wait: Some(cancel),
                 log: Some(log),
+                get_config: Some(get_config),
+                set_config: Some(set_config),
             }));
             // SAFETY: vtable 是 Box::leak 出来的，地址稳定且布局正确。
             unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能被解包")
@@ -331,6 +380,21 @@ mod tests {
         assert_eq!(id.id, 42);
         // 非对象参数退化成空对象，而不是把 `null` 拼进请求。
         assert_eq!(api.invoke_value("getMe", Value::Null).unwrap().id, 42);
+    }
+
+    #[test]
+    fn config_value_parses_the_host_buffer() {
+        let api = fake_host::api();
+        // 假宿主只认 section="demo" + 空 key，返回 `{"a":1}`。
+        assert_eq!(api.config_value("demo", "").unwrap()["a"], 1);
+        // 段不存在 → None（不是 panic、也不是 Null）。
+        assert!(api.config_value("ghost", "").is_none());
+        assert!(api.config_value("demo", "nope").is_none());
+        // 写自己的段：假宿主恒返回 0 → Ok。
+        assert!(
+            api.set_config_value("k", serde_json::json!({"x": 1}))
+                .is_ok()
+        );
     }
 
     #[test]

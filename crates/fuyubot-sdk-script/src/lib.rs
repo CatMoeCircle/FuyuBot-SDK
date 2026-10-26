@@ -30,13 +30,32 @@
 //! | `{"op":"invoke","tag":2,"method":"sendMessage","params":{...}}` | 发 TDLib 请求 | `{"op":"invoked","tag":2,"request_id":R}` |
 //! | `{"op":"emit","event":"x","payload":{...}}` | 发一条自定义事件 | 无 |
 //! | `{"op":"tool","descriptor":{...}}` | 登记工具元数据 | `{"op":"tool","tag":n,"handle":N}` |
+//! | `{"op":"callTool","tag":n,"name":"x","input":{...}}` | 调用工具（异步） | `{"op":"invoked","tag":n,"request_id":R}` |
+//! | `{"op":"listTools","tag":n}` | 列出全部工具元数据（同步） | `{"op":"listTools","tag":n,"tools":[...]}` |
+//! | `{"op":"execute","tag":n,"request":{...}}` | 同步执行不碰网络的 TDLib 方法 | `{"op":"execute","tag":n,"result":{...}}` |
+//! | `{"op":"middleware","tag":n,"stage":N}` | 挂中间件（`stage` 0..5） | `{"op":"middleware","tag":n,"handle":N}` |
+//! | `{"op":"wait","tag":n,"filter":{...},"timeout_ms":M}` | 阻塞等一条匹配的更新 | `{"op":"wait","tag":n,"payload":{...}}` |
+//! | `{"op":"getService","tag":n,"name":"x"}` | 读一个服务的元数据 | `{"op":"getService","tag":n,"service":{...}}` |
+//! | `{"op":"callService","tag":n,"name":"x","method":"m","input":{...}}` | 同步调服务方法 | `{"op":"callService","tag":n,"result":{...}}` |
+//! | `{"op":"getConfig","tag":n,"section":"x","key":"a.b"}` | 读全局配置的一段/键（`key` 可省 = 整段；`section` 空串 = 顶层） | `{"op":"getConfig","tag":n,"config":{...}}`（不存在时 `null`） |
+//! | `{"op":"setConfig","tag":n,"key":"a.b","value":{...}}` | 写**自己**的配置段（`key` 空串 = 覆盖整段） | `{"op":"setConfig","tag":n}`；失败回 `error` |
 //!
 //! 宿主 → 脚本：
 //!
 //! | 行 | 作用 |
 //! |---|---|
 //! | `{"op":"event","event":"updateNewMessage","payload":{...}}` | 你订阅的事件来了 |
+//! | `{"op":"middleware","handle":N,"stage":N,"payload":{...}}` | 你挂的中间件被调了 |
 //! | 上面那几种回执 | 你给的 `tag` 会原样带回，方便脚本自己配对 |
+//!
+//! ## 自己的配置段：启动时就给（`plugin_config`）
+//!
+//! 脚本的 `config`（`argv[2]` 那份 JSON）里会多一个 `"plugin_config"` 键，内容是
+//! `[plugin.<本插件名>]` 那一段。它在 spawn 之前就填好了，所以脚本**在 `run()` 之前**
+//! 就能同步读到——这是最常用的场景（「我自己的配置」）。
+//!
+//! 读**别人**的段、或写自己的段，才需要发 `getConfig` / `setConfig` 请求：那两者
+//! 都是异步的，得在 `run()` 之后（也就是事件回调里）用。
 //!
 //! ## 用法（插件 crate 的全部代码）
 //!
@@ -52,13 +71,14 @@
 //! 脚本若一直不读 stdin，宿主那条线程会在写管道时被拖住。
 
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use fuyubot_plugin_api::{HostApi, HostExt, LogLevel, Subscription};
+use fuyubot_plugin_api::{HostApi, HostExt, LogLevel, Stage, Subscription};
 use serde_json::{Value, json};
 
 /// `plugin_start` 最多等脚本报 `ready` 多久。
@@ -161,6 +181,30 @@ impl SubState {
     }
 }
 
+/// 一条中间件在宿主侧的私有数据（回调的 `user_data`）。
+///
+/// 与 [`SubState`] 的差别：中间件回调除了负载，还带一个 `stage`，脚本侧要据此
+/// 知道这次命中是发生在哪个阶段（`pre_update` / `pre_route` / …）。
+struct MiddlewareState {
+    chat: Arc<Chat>,
+    /// 脚本侧的中间件编号（= 宿主句柄 id）。注册是同步的、句柄要等宿主返回才知道，
+    /// 所以先放 0、拿到句柄再填——与 [`SubState`] 的 handle 同一个道理。
+    handle: AtomicU64,
+}
+
+impl MiddlewareState {
+    fn forward(&self, stage: u32, payload: *const core::ffi::c_char) {
+        // SAFETY: 同 SubState::forward。
+        let payload = unsafe { fuyubot_plugin_api::parse_payload(payload) };
+        self.chat.send(&json!({
+            "op": "middleware",
+            "handle": self.handle.load(Ordering::Relaxed),
+            "stage": stage,
+            "payload": payload,
+        }));
+    }
+}
+
 /// 脚本启动到哪一步了。///
 /// `plugin_start` 必须**等脚本报 `ready` 才能返回**：脚本里的
 /// `host.on(...)` 是一条条写到宿主这边来的，宿主没法知道「它注册完了没有」。
@@ -182,6 +226,11 @@ struct Shared {
     subs: Mutex<HashMap<u64, Subscription>>,
     /// 每条订阅的私有数据，必须活到插件停止。
     states: Mutex<Vec<Arc<SubState>>>,
+    /// 每条中间件的私有数据，必须活到插件停止。
+    ///
+    /// 中间件在 ABI 层**没有注销入口**（`use_middleware` 只返回句柄，没有对称的
+    /// off），只能随插件卸载整批回滚。所以这里只留 state 转发，不提供单独退订。
+    middleware_states: Mutex<Vec<Arc<MiddlewareState>>>,
     startup: Mutex<Startup>,
     startup_signal: Condvar,
 }
@@ -193,6 +242,7 @@ impl Shared {
             chat,
             subs: Mutex::new(HashMap::new()),
             states: Mutex::new(Vec::new()),
+            middleware_states: Mutex::new(Vec::new()),
             startup: Mutex::new(Startup::Waiting),
             startup_signal: Condvar::new(),
         }
@@ -349,6 +399,154 @@ impl Shared {
                 }
             }
 
+            "callTool" => {
+                let Some(name) = value.get("name").and_then(Value::as_str) else {
+                    self.fail(tag, "callTool 缺 name 字段");
+                    return;
+                };
+                let input = value
+                    .get("input")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "{}".to_owned());
+                match self.host.call_tool(name, &input) {
+                    Ok(request) => self.reply(tag, "invoked", json!({ "request_id": request.id })),
+                    Err(e) => self.fail(tag, &format!("callTool {name} 失败: {e}")),
+                }
+            }
+
+            "listTools" => {
+                let tools = self.host.list_tools();
+                let parsed = serde_json::from_str(&tools).unwrap_or(Value::Null);
+                self.reply(tag, "listTools", json!({ "tools": parsed }));
+            }
+
+            "execute" => {
+                let request = value
+                    .get("request")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "{}".to_owned());
+                let result = self
+                    .host
+                    .td_execute(&request)
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or(Value::Null);
+                self.reply(tag, "execute", json!({ "result": result }));
+            }
+
+            "middleware" => {
+                let Some(stage_num) = value.get("stage").and_then(Value::as_u64) else {
+                    self.fail(tag, "middleware 缺 stage 字段");
+                    return;
+                };
+                let Some(stage) = Stage::from_u32(stage_num as u32) else {
+                    self.fail(tag, &format!("非法的中间件阶段: {stage_num}"));
+                    return;
+                };
+                let state = Arc::new(MiddlewareState {
+                    chat: Arc::clone(&self.chat),
+                    handle: AtomicU64::new(0),
+                });
+                // Arc 的堆分配地址稳定，塞进 `middleware_states` 之后这个指针照样有效。
+                let pointer = Arc::as_ptr(&state) as *mut core::ffi::c_void;
+                let handle = self.host.use_middleware(stage, forward_middleware, pointer);
+                if !handle.is_valid() {
+                    self.fail(tag, "中间件注册失败");
+                    return;
+                }
+                // 句柄写进 state，脚本据此知道是哪个中间件被调了。
+                state.handle.store(handle.id, Ordering::Relaxed);
+                self.middleware_states
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(state);
+                self.reply(tag, "middleware", json!({ "handle": handle.id }));
+            }
+
+            "wait" => {
+                let filter = value
+                    .get("filter")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "{}".to_owned());
+                let timeout_ms = value.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0);
+                // `wait_for_update` 会阻塞当前线程；pump 线程被它占住就没法继续读脚本的
+                // 其它行了。所以放到独立线程，匹配/超时之后再把结果回给脚本。
+                let host = self.host;
+                let chat = Arc::clone(&self.chat);
+                let reply_tag = tag;
+                std::thread::spawn(move || {
+                    let handle = host.wait_for_update(&filter, timeout_ms);
+                    if !handle.did_match() {
+                        chat.send(&json!({
+                            "op": "wait",
+                            "tag": reply_tag,
+                            "payload": Value::Null,
+                        }));
+                        return;
+                    }
+                    // SAFETY: 宿主保证 payload 在本线程下一次宿主调用前有效，这里立刻拷走。
+                    let payload = unsafe { fuyubot_plugin_api::parse_payload(handle.payload_json) };
+                    chat.send(&json!({
+                        "op": "wait",
+                        "tag": reply_tag,
+                        "payload": payload,
+                    }));
+                });
+            }
+
+            "getService" => {
+                let Some(name) = value.get("name").and_then(Value::as_str) else {
+                    self.fail(tag, "getService 缺 name 字段");
+                    return;
+                };
+                let vtable = self.host.get_service(name);
+                if vtable.is_null() {
+                    self.reply(tag, "getService", json!({ "service": Value::Null }));
+                    return;
+                }
+                // SAFETY: 宿主返回的 vtable 在插件生命周期内有效；这里只读。
+                let service = unsafe { describe_service(vtable) };
+                self.reply(tag, "getService", json!({ "service": service }));
+            }
+
+            "callService" => {
+                let (Some(name), Some(method)) = (
+                    value.get("name").and_then(Value::as_str),
+                    value.get("method").and_then(Value::as_str),
+                ) else {
+                    self.fail(tag, "callService 缺 name 或 method 字段");
+                    return;
+                };
+                let input = value
+                    .get("input")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "{}".to_owned());
+                // SAFETY: 宿主返回的 vtable 在插件生命周期内有效。
+                let result = unsafe { call_service(self.host.get_service(name), method, &input) };
+                match result {
+                    Some(text) => {
+                        let parsed = serde_json::from_str(&text).unwrap_or(Value::Null);
+                        self.reply(tag, "callService", json!({ "result": parsed }));
+                    }
+                    None => self.fail(tag, &format!("服务 {name} 没有方法 {method} 或不存在")),
+                }
+            }
+
+            "getConfig" => {
+                let section = value.get("section").and_then(Value::as_str).unwrap_or("");
+                let key = value.get("key").and_then(Value::as_str).unwrap_or("");
+                let config = self.host.config_value(section, key).unwrap_or(Value::Null);
+                self.reply(tag, "getConfig", json!({ "config": config }));
+            }
+
+            "setConfig" => {
+                let key = value.get("key").and_then(Value::as_str).unwrap_or("");
+                let setting = value.get("value").cloned().unwrap_or(Value::Null);
+                match self.host.set_config_value(key, setting) {
+                    Ok(()) => self.reply(tag, "setConfig", json!({})),
+                    Err(e) => self.fail(tag, &format!("setConfig 失败: {e}")),
+                }
+            }
+
             other => self.fail(tag, &format!("不认识的 op: {other}")),
         }
     }
@@ -356,6 +554,10 @@ impl Shared {
     fn shutdown(&self) {
         self.subs.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.middleware_states
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -391,6 +593,87 @@ unsafe extern "C-unwind" fn forward(
     0
 }
 
+/// 中间件回调：把「阶段 + 负载」转写给脚本。签名见 [`fuyubot_plugin_api::MiddlewareCallbackFn`]。
+unsafe extern "C-unwind" fn forward_middleware(
+    user_data: *mut core::ffi::c_void,
+    stage: u32,
+    payload: *const core::ffi::c_char,
+) -> i32 {
+    // SAFETY: user_data 是 `Shared::handle_line` 里 `Arc::as_ptr` 出来的，活到 shutdown。
+    let Some(state) = (unsafe { (user_data as *const MiddlewareState).as_ref() }) else {
+        return -1;
+    };
+    state.forward(stage, payload);
+    0
+}
+
+/// 把一个 [`ServiceVTable`] 读成脚本看得懂的描述：名字 + 方法名列表。
+///
+/// # Safety
+/// `vtable` 必须指向一个活着的、由宿主构造的服务描述（`get_service` 返回）。
+unsafe fn describe_service(vtable: *const fuyubot_plugin_api::ServiceVTable) -> Value {
+    // SAFETY: 调用方保证 vtable 有效。
+    let service = unsafe { &*vtable };
+    let name = if service.name.is_null() {
+        String::new()
+    } else {
+        // SAFETY: ABI 契约要求 name 是 NUL 结尾 UTF-8。
+        unsafe { CStr::from_ptr(service.name) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut methods = Vec::new();
+    if !service.methods.is_null() {
+        for index in 0..service.method_count {
+            // SAFETY: methods 指向 method_count 个连续的 ServiceMethod。
+            let method = unsafe { &*service.methods.add(index) };
+            if method.name.is_null() {
+                continue;
+            }
+            // SAFETY: 同上。
+            methods.push(
+                unsafe { CStr::from_ptr(method.name) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    json!({ "name": name, "methods": methods })
+}
+
+/// 调用服务的一个方法，返回其 JSON 结果文本。服务不存在或方法不存在时返回 `None`。
+///
+/// # Safety
+/// `vtable` 必须指向一个活着的服务描述，或为 null（表示服务不存在）。
+unsafe fn call_service(
+    vtable: *const fuyubot_plugin_api::ServiceVTable,
+    method_name: &str,
+    input_json: &str,
+) -> Option<String> {
+    let service = unsafe { vtable.as_ref()? };
+    let method = (0..service.method_count)
+        .map(|index| unsafe { &*service.methods.add(index) })
+        .find(|method| {
+            !method.name.is_null()
+                && unsafe { CStr::from_ptr(method.name) }.to_string_lossy() == method_name
+        })?;
+    let func = method.func?;
+    let Ok(input) = CString::new(input_json) else {
+        return None;
+    };
+    // SAFETY: func 是服务提供方给的函数指针，input 在调用期间存活。
+    let raw = unsafe { func(service.context, input.as_ptr()) };
+    if raw.is_null() {
+        return Some("null".to_owned());
+    }
+    // SAFETY: 服务契约要求返回的字符串由提供方持有、调用方读完即弃。
+    Some(
+        unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 /// 脚本插件的桥。插件 crate 只管用 [`script_plugin!`] 生成，不用直接碰它。
 pub struct Bridge {
     host: HostApi,
@@ -422,9 +705,12 @@ impl Bridge {
     /// [`STARTUP_TIMEOUT`]。
     pub fn start(&mut self, config_json: &str) -> Result<(), String> {
         let script = resolve_script(config_json, self.script);
+        // 在 spawn **之前**把自己的配置段塞进去：脚本在 `run()` 之前收不到任何回执，
+        // 而「我自己的配置」正是启动期最常要的东西（详见 `with_own_config`）。
+        let config_json = self.with_own_config(config_json);
         let mut tried = Vec::new();
         for candidate in self.runtime.candidates() {
-            let mut child = match spawn(candidate, &script, config_json) {
+            let mut child = match spawn(candidate, &script, &config_json) {
                 Ok(child) => child,
                 Err(e) => {
                     tried.push(format!("{candidate}: {e}"));
@@ -493,6 +779,27 @@ impl Bridge {
             tried.join("; "),
             script.display()
         ))
+    }
+
+    /// 把 `[plugin.<本插件名>]` 那段塞进给脚本的配置 JSON（键名 `plugin_config`）。
+    ///
+    /// 为什么在这里塞、而不是让脚本发 `getConfig` 请求：**脚本在 `run()` 之前读不到
+    /// 任何回执**（那时它还没开始读 stdin），而「我自己的配置」恰恰是启动期最常见的需求。
+    /// 取不到（没配这段、或宿主不支持）就原样返回，脚本侧按空对象兜底。
+    fn with_own_config(&self, config_json: &str) -> String {
+        let Some(own) = self.host.config_value(self.name, "") else {
+            return config_json.to_owned();
+        };
+        // 宿主给的 config 正常是个对象（目录之类）；空串 / 非法 / 非对象都退化成空对象，
+        // 别把脚本的 argv 搞坏。
+        let mut config = match serde_json::from_str::<Value>(config_json) {
+            Ok(object @ Value::Object(_)) => object,
+            _ => json!({}),
+        };
+        if let Some(map) = config.as_object_mut() {
+            map.insert("plugin_config".to_owned(), own);
+        }
+        config.to_string()
     }
 
     /// 杀掉解释器、回收订阅。
@@ -632,6 +939,21 @@ mod tests {
         /// 最后一次 `on` 收到的回调。**故意不在 `on` 里就调它**：真实宿主
         /// 不可能在 `on` 返回之前投递事件（句柄还没发出去），桩也不该替它造这个场景。
         callback: Mutex<Option<(usize, fuyubot_plugin_api::EventCallbackFn)>>,
+        /// `callTool` 收到的调用。
+        tool_calls: Mutex<Vec<(String, String)>>,
+        /// `execute`（同步 TDLib）收到的请求，以及要返回的结果（可空）。
+        executes: Mutex<Vec<String>>,
+        /// `use_middleware` 收到的阶段；回调也存起来供 `fire_middleware` 用。
+        middleware: Mutex<
+            Vec<(
+                u32,
+                Option<(usize, fuyubot_plugin_api::MiddlewareCallbackFn)>,
+            )>,
+        >,
+        /// 读配置收到的 `(section, key)`。
+        config_reads: Mutex<Vec<(String, String)>>,
+        /// 写配置收到的 `(key, value_json)`。
+        config_writes: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeHost {
@@ -643,6 +965,25 @@ mod tests {
             // SAFETY: 回调按 ABI 契约接受 (user_data, NUL 结尾字符串)；
             // user_data 是订阅方给的 SubState，还活着。
             unsafe { callback(user_data as *mut c_void, payload.as_ptr() as *const c_char) };
+        }
+
+        /// 像真实宿主那样触发一次中间件回调。
+        fn fire_middleware(&self, stage: u32, payload: &str) {
+            let stored = self.middleware.lock().unwrap();
+            let (user_data, callback) = stored
+                .last()
+                .and_then(|(_, cb)| cb.as_ref())
+                .copied()
+                .expect("先得有人挂中间件");
+            let payload = std::ffi::CString::new(payload).unwrap();
+            // SAFETY: 回调按 ABI 契约接受 (user_data, stage, payload)。
+            unsafe {
+                callback(
+                    user_data as *mut c_void,
+                    stage,
+                    payload.as_ptr() as *const c_char,
+                )
+            };
         }
     }
 
@@ -733,14 +1074,29 @@ mod tests {
         0
     }
     unsafe extern "C" fn call_tool(
-        _h: *mut c_void,
-        _n: *const c_char,
-        _i: *const c_char,
+        host: *mut c_void,
+        name: *const c_char,
+        input: *const c_char,
     ) -> fuyubot_plugin_api::RequestId {
-        fuyubot_plugin_api::RequestId::INVALID
+        // SAFETY: 同上。
+        let name = unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned();
+        let input = unsafe { CStr::from_ptr(input) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .tool_calls
+            .lock()
+            .unwrap()
+            .push((name, input));
+        fuyubot_plugin_api::RequestId { id: 88 }
     }
     unsafe extern "C" fn list_tools(_h: *mut c_void) -> *const c_char {
-        core::ptr::null()
+        // 返回一个静态的 JSON 数组（宿主线程局部缓冲的简化版）。
+        static TOOLS: &[u8] = b"[{\"name\":\"demo\"}]\0";
+        TOOLS.as_ptr() as *const c_char
     }
     unsafe extern "C" fn provide(
         _h: *mut c_void,
@@ -759,12 +1115,18 @@ mod tests {
         fuyubot_plugin_api::RequestId::INVALID
     }
     unsafe extern "C" fn middleware(
-        _h: *mut c_void,
-        _s: u32,
-        _c: Option<fuyubot_plugin_api::MiddlewareCallbackFn>,
-        _u: *mut c_void,
+        host: *mut c_void,
+        stage: u32,
+        callback: Option<fuyubot_plugin_api::MiddlewareCallbackFn>,
+        user_data: *mut c_void,
     ) -> fuyubot_plugin_api::MiddlewareHandle {
-        fuyubot_plugin_api::MiddlewareHandle::INVALID
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .middleware
+            .lock()
+            .unwrap()
+            .push((stage, callback.map(|cb| (user_data as usize, cb))));
+        fuyubot_plugin_api::MiddlewareHandle { id: 6 }
     }
     unsafe extern "C" fn wait(
         _h: *mut c_void,
@@ -774,8 +1136,63 @@ mod tests {
         fuyubot_plugin_api::WaitHandle::INVALID
     }
     unsafe extern "C" fn cancel(_h: *mut c_void, _w: fuyubot_plugin_api::WaitHandle) {}
-    unsafe extern "C" fn execute(_h: *mut c_void, _r: *const c_char) -> *const c_char {
+    unsafe extern "C" fn execute(host: *mut c_void, request: *const c_char) -> *const c_char {
+        // SAFETY: 同上。
+        let text = unsafe { CStr::from_ptr(request) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }.executes.lock().unwrap().push(text);
+        // 返回一个静态 JSON（宿主线程局部缓冲的简化版）。
+        static RESULT: &[u8] = b"{\"@type\":\"textEntities\",\"entities\":[]}\0";
+        RESULT.as_ptr() as *const c_char
+    }
+
+    /// 读配置：只有 `test.script` 这一段有值，其余返回 NULL（= 不存在）。
+    unsafe extern "C" fn get_config(
+        host: *mut c_void,
+        section: *const c_char,
+        key: *const c_char,
+    ) -> *const c_char {
+        // SAFETY: ABI 契约保证是 NUL 结尾字符串。
+        let section = unsafe { CStr::from_ptr(section) }
+            .to_string_lossy()
+            .into_owned();
+        let key = unsafe { CStr::from_ptr(key) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .config_reads
+            .lock()
+            .unwrap()
+            .push((section.clone(), key.clone()));
+        if section == "test.script" && key.is_empty() {
+            static BODY: &[u8] = b"{\"greeting\":\"hi\"}\0";
+            return BODY.as_ptr() as *const c_char;
+        }
         core::ptr::null()
+    }
+
+    unsafe extern "C" fn set_config(
+        host: *mut c_void,
+        key: *const c_char,
+        value: *const c_char,
+    ) -> i32 {
+        // SAFETY: ABI 契约保证是 NUL 结尾字符串。
+        let key = unsafe { CStr::from_ptr(key) }
+            .to_string_lossy()
+            .into_owned();
+        let value = unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .config_writes
+            .lock()
+            .unwrap()
+            .push((key, value));
+        0
     }
 
     type VTable = fuyubot_plugin_api::HostApiVTable;
@@ -802,6 +1219,8 @@ mod tests {
             wait_for_update: Some(wait),
             cancel_wait: Some(cancel),
             log: Some(log),
+            get_config: Some(get_config),
+            set_config: Some(set_config),
         }));
         // SAFETY: vtable 是 Box::leak 出来的，布局与 ABI 契约一致。
         let api = unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能被解包");
@@ -886,6 +1305,126 @@ mod tests {
             written
                 .iter()
                 .any(|line| line.contains("\"op\":\"invoked\"")),
+            "{written:?}"
+        );
+    }
+
+    /// 补上的工具/同步执行/中间件几个 op 也要能落到宿主，并给脚本带回执。
+    #[test]
+    fn tool_and_execute_ops_reach_the_host() {
+        let (shared, sink, fake) = shared();
+
+        // callTool：异步，走 response 通道，回 `invoked`。
+        shared.handle_line(r#"{"op":"callTool","tag":10,"name":"demo","input":{"x":1}}"#);
+        // listTools：同步，回工具列表。
+        shared.handle_line(r#"{"op":"listTools","tag":11}"#);
+        // execute：同步执行不碰网络的 TDLib 方法，回结果。
+        shared.handle_line(
+            r#"{"op":"execute","tag":12,"request":{"@type":"parseTextEntities","text":"hi"}}"#,
+        );
+
+        assert_eq!(fake.tool_calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.tool_calls.lock().unwrap()[0].0, "demo");
+        assert_eq!(fake.executes.lock().unwrap().len(), 1);
+        assert!(fake.executes.lock().unwrap()[0].contains("parseTextEntities"));
+
+        let written = sink.0.lock().unwrap();
+        assert!(
+            written
+                .iter()
+                .any(|line| line.contains("\"op\":\"invoked\"") && line.contains("\"tag\":10")),
+            "{written:?}"
+        );
+        assert!(
+            written
+                .iter()
+                .any(|line| line.contains("\"op\":\"listTools\"") && line.contains("\"demo\"")),
+            "{written:?}"
+        );
+        assert!(
+            written
+                .iter()
+                .any(|line| line.contains("\"op\":\"execute\"") && line.contains("textEntities")),
+            "{written:?}"
+        );
+    }
+
+    /// 启动期就把「自己的配置段」塞进给脚本的 config（`plugin_config` 键）。
+    ///
+    /// 关键点：原有的键要保留、读的时候用插件名当 section 且 key 为空。
+    #[test]
+    fn own_config_is_injected_before_the_script_starts() {
+        let (api, fake) = fake_vtable();
+        let bridge = Bridge::new(api, "test.script", Runtime::Python, "x.py");
+        let merged = bridge.with_own_config(r#"{"plugins_dir":"/p"}"#);
+        let value: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["plugins_dir"], "/p", "原有的键不能丢：{merged}");
+        assert_eq!(value["plugin_config"]["greeting"], "hi", "{merged}");
+
+        // ⚠️ guard 要放进块里：`MutexGuard` 是到**作用域结束**才释放的，
+        // 留在函数级会让下面第二次 `with_own_config` 再 lock 同一把锁 → 自死锁。
+        {
+            let reads = fake.config_reads.lock().unwrap();
+            assert_eq!(reads[0].0, "test.script", "section 要用插件名");
+            assert!(reads[0].1.is_empty(), "key 空串才读整段");
+        }
+
+        // config 不是对象（空串 / 非法）时也要能兜住，别把 argv 搞坏。
+        let fallback = bridge.with_own_config("");
+        let value: Value = serde_json::from_str(&fallback).unwrap();
+        assert_eq!(value["plugin_config"]["greeting"], "hi", "{fallback}");
+    }
+
+    /// `getConfig` / `setConfig` 两个 op 要落到宿主，并给脚本带回执。
+    #[test]
+    fn config_ops_reach_the_host() {
+        let (shared, sink, fake) = shared();
+
+        shared.handle_line(r#"{"op":"getConfig","tag":30,"section":"test.script"}"#);
+        shared.handle_line(r#"{"op":"setConfig","tag":31,"key":"k","value":2}"#);
+
+        // 写要真的落到宿主（key + JSON 值）。
+        let writes = fake.config_writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].0, "k");
+        assert_eq!(writes[0].1, "2");
+
+        let written = sink.0.lock().unwrap();
+        // 读的回执要把宿主的 JSON 解析成对象带给脚本。
+        assert!(
+            written
+                .iter()
+                .any(|line| line.contains("\"op\":\"getConfig\"")
+                    && line.contains("\"tag\":30")
+                    && line.contains("greeting")),
+            "{written:?}"
+        );
+        // 写的回执只带 tag。
+        assert!(
+            written
+                .iter()
+                .any(|line| line.contains("\"op\":\"setConfig\"") && line.contains("\"tag\":31")),
+            "{written:?}"
+        );
+    }
+
+    /// 中间件回调要把 stage 与负载带给脚本。
+    #[test]
+    fn middleware_callbacks_carry_stage_and_payload() {
+        let (shared, sink, fake) = shared();
+        shared.handle_line(r#"{"op":"middleware","tag":20,"stage":0}"#);
+
+        // 真实宿主会在更新经过时触发中间件；桩手动触发一次。
+        fake.fire_middleware(0, r#"{"@type":"updateNewMessage"}"#);
+
+        let written = sink.0.lock().unwrap();
+        assert!(
+            written.iter().any(|line| {
+                line.contains("\"op\":\"middleware\"")
+                    && line.contains("\"stage\":0")
+                    && line.contains("\"handle\":6")
+                    && line.contains("updateNewMessage")
+            }),
             "{written:?}"
         );
     }
