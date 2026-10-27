@@ -148,6 +148,8 @@ pub fn new_plugin(root: &Path, name: &str, lang: Lang) -> Result<PathBuf, String
             )?;
             write(&dir.join("fuyubot_plugin.js"), BRIDGE_JS)?;
             write(&dir.join("fuyubot_plugin.d.ts"), STUB_JS)?;
+            // TDLib 的精确类型：给 `on` / `invoke` 用的 td_api.d.ts。
+            write(&dir.join("td_api.d.ts"), &crate::td_types::generate())?;
         }
     }
     Ok(dir)
@@ -192,6 +194,13 @@ pub fn codegen(dir: &Path, lang: Lang) -> Result<Vec<PathBuf>, String> {
     for (name, content) in files {
         let path = dir.join(name);
         write(&path, content)?;
+        written.push(path);
+    }
+    // JS 额外带一份 TDLib 精确类型（`on` / `invoke` 用的 td_api.d.ts）。
+    // 它不是 include_str 的静态文件，而是从编译期 schema 现生成的。
+    if lang == Lang::Js {
+        let path = dir.join("td_api.d.ts");
+        write(&path, &crate::td_types::generate())?;
         written.push(path);
     }
     Ok(written)
@@ -335,6 +344,17 @@ mod tests {
                  重新从 crates/fuyubot-sdk-script/ 拷一份（`fuyubot-sdk codegen` 也行）"
             );
         }
+
+        // td_api.d.ts 是生成产物：示例里那份必须与生成器当前产出逐字一致。
+        let td_path = root.join("examples").join("ts-counter").join("td_api.d.ts");
+        let copied = std::fs::read_to_string(&td_path)
+            .unwrap_or_else(|e| panic!("读不了 {}: {e}", td_path.display()));
+        assert_eq!(
+            copied,
+            crate::td_types::generate(),
+            "examples/ts-counter/td_api.d.ts 与生成器产出不一致：\
+             用 `fuyubot-sdk td-types --out examples/ts-counter` 重新生成"
+        );
     }
 
     #[test]
@@ -392,7 +412,7 @@ mod tests {
             STUB_PY
         );
 
-        assert_eq!(codegen(&dir, Lang::Js).unwrap().len(), 2);
+        assert_eq!(codegen(&dir, Lang::Js).unwrap().len(), 3);
         assert_eq!(
             std::fs::read_to_string(dir.join("fuyubot_plugin.js")).unwrap(),
             BRIDGE_JS
@@ -400,6 +420,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("fuyubot_plugin.d.ts")).unwrap(),
             STUB_JS
+        );
+        // td_api.d.ts 是现生成的，与生成器直接产出逐字一致。
+        assert_eq!(
+            std::fs::read_to_string(dir.join("td_api.d.ts")).unwrap(),
+            crate::td_types::generate()
         );
 
         // Rust：没有「生成出来的绑定」，返回空

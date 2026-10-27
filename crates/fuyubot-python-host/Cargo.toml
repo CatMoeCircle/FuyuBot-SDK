@@ -1,0 +1,18 @@
+[package]
+name = "fuyubot-python-host"
+description = "Python 脚本的中间插件：扫目录、uv run 起进程、stdio 桥接、子作用域隔离"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fuyubot-plugin-api.workspace = true
+fuyubot-sdk-host.workspace = true
+# 链接原生桥，让 `fuyubot_bridge_*` 一起导出——脚本进程里加载的同一个 dll
+# 就是这份，走它的原生后端路径（读写自己的 stdio）。
+fuyubot-sdk-native.workspace = true

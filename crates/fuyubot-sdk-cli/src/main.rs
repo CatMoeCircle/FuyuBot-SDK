@@ -8,9 +8,6 @@
 //!
 //! 打包是插件作者用自己的语言工具链完成的事（cargo / gcc / maturin / napi），
 //! 两个 CLI 都不参与（变更 5）。
-//!
-//! 目前实现了三个不需要碰别处的命令：`abi-version` / `td-methods` / `td-method`。
-//! 其余命令（`init` / `codegen` / `check` / `attach`）按 `docs/ROADMAP.md` 的 B 逐项补。
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +17,7 @@ use fuyubot_tdlib_sys::{EntryKind, TdApiSchema, TlEntry};
 use object::{Object, ObjectKind};
 
 mod scaffold;
+mod td_types;
 
 /// `fuyubot-sdk`：fuyubot 插件开发工具。
 #[derive(Parser, Debug)]
@@ -46,8 +44,17 @@ enum Command {
     TdMethods(TdMethodsArgs),
     /// 查看某个 TDLib 方法的签名、参数与说明
     TdMethod(TdMethodArgs),
+    /// 从 td_api.tl 生成 TypeScript 类型声明（给 `on` / `invoke` 的精确类型）
+    TdTypes(TdTypesArgs),
     /// 静态检查一个插件产物：导出符号与文件类型（**不加载、不运行、不连 Telegram**）
     Check(CheckArgs),
+}
+
+#[derive(Args, Debug)]
+struct TdTypesArgs {
+    /// 写到哪个目录（默认当前目录）；会写 `td_api.d.ts`（覆盖同名文件）
+    #[arg(long, default_value = ".")]
+    out: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -149,6 +156,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::TdMethod(args) => print!("{}", render_method(find_function(&args.name)?)),
+        Command::TdTypes(args) => {
+            let content = td_types::generate();
+            let path = args.out.join("td_api.d.ts");
+            std::fs::write(&path, &content)
+                .map_err(|e| format!("写不了 {}: {e}", path.display()))?;
+            println!(
+                "已生成 {} 的 TDLib 类型声明：{}",
+                "TypeScript",
+                path.display()
+            );
+        }
         Command::Check(args) => {
             let report = check(&args.path)?;
             print!("{}", report.render());
@@ -290,7 +308,7 @@ fn check(path: &Path) -> Result<CheckReport, String> {
 
 /// 方法名列表（已排序）。`filter` 是**忽略大小写的子串**匹配。
 ///
-// ponytail: 每次全量扫一遍那三千多条；上千个函数扫一遍是微秒级，需要索引时再说。
+// 每次全量扫一遍那三千多条；上千个函数扫一遍是微秒级，需要索引时再说。
 fn method_names(filter: Option<&str>) -> Vec<&'static str> {
     let filter = filter.map(str::to_lowercase);
     let mut names: Vec<&'static str> = TdApiSchema::compiled()

@@ -1,0 +1,17 @@
+[package]
+name = "fuyubot-sdk-native"
+description = "脚本插件的原生桥：脚本进程里被 ctypes / bun:ffi 加载，读写 stdio 与宿主通信"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib 给脚本进程加载（ctypes / bun:ffi）；rlib 让单测能在本 crate 里直接调
+# 那些导出函数背后的实现（不用真的 dlopen）。
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 协议是「一行一个 JSON」，解析/序列化只要它。
+serde_json.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "fuyubot-js-host"
+description = "JS/TS 脚本的中间插件：扫目录、bun 起进程、stdio 桥接、子作用域隔离"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fuyubot-plugin-api.workspace = true
+fuyubot-sdk-host.workspace = true
+# 同 fuyubot-python-host：链接原生桥，让 fuyubot_bridge_* 一起导出。
+fuyubot-sdk-native.workspace = true

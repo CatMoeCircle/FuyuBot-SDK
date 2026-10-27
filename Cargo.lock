@@ -210,6 +210,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuyubot-js-host"
+version = "0.1.0"
+dependencies = [
+ "fuyubot-plugin-api",
+ "fuyubot-sdk-host",
+ "fuyubot-sdk-native",
+]
+
+[[package]]
 name = "fuyubot-plugin-api"
 version = "0.1.0"
 dependencies = [
@@ -225,6 +234,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuyubot-python-host"
+version = "0.1.0"
+dependencies = [
+ "fuyubot-plugin-api",
+ "fuyubot-sdk-host",
+ "fuyubot-sdk-native",
+]
+
+[[package]]
 name = "fuyubot-sdk-cli"
 version = "0.1.0"
 dependencies = [
@@ -232,6 +250,22 @@ dependencies = [
  "fuyubot-abi",
  "fuyubot-tdlib-sys",
  "object",
+]
+
+[[package]]
+name = "fuyubot-sdk-host"
+version = "0.1.0"
+dependencies = [
+ "fuyubot-plugin-api",
+ "fuyubot-sdk-native",
+ "serde_json",
+]
+
+[[package]]
+name = "fuyubot-sdk-native"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

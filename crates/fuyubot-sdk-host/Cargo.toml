@@ -1,0 +1,19 @@
+[package]
+name = "fuyubot-sdk-host"
+description = "中间插件的宿主侧共享逻辑：扫目录、起脚本进程、stdio 桥接、子作用域"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# rlib：被 fuyubot-python-host / fuyubot-js-host 链接，本身不单独分发。
+crate-type = ["rlib"]
+
+[dependencies]
+fuyubot-plugin-api.workspace = true
+# 链接原生桥，让 `fuyubot_bridge_*` 跟着中间插件的 dll 一起导出——脚本进程里加载的
+# 同一个 dll 就靠这几个符号当原生后端。这里还负责用 `#[used]` 锚点钉住它们（见 lib.rs）。
+fuyubot-sdk-native.workspace = true
+serde_json.workspace = true
