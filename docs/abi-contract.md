@@ -19,7 +19,7 @@
 | `plugin_free_string` | `void plugin_free_string(char *ptr)` | v3 | 见下 | 宿主，归还插件给的字符串 |
 | `plugin_manifest` | `const char *plugin_manifest(void)` | v4 | 否 | 宿主，**`plugin_init` 之前** |
 | `fuyubot_abi_version` | `uint32_t fuyubot_abi_version(void)` | v4 | 否 | `fuyubot-sdk check` 静态读 |
-| `plugin_free_handle` | `void plugin_free_handle(PluginHandle)` | v4 | 否 | 宿主，ABI 版本不匹配时 |
+| `plugin_free_handle` | `void plugin_free_handle(PluginHandle)` | v4 | 否 | 宿主，ABI 版本不匹配时（不导出就在那一刻漏掉插件侧状态） |
 
 几条容易踩的：
 
@@ -28,7 +28,8 @@
 - `plugin_free_string` 在 v3 里"必须有但可以是空实现"。**v4 起只要插件往外送过字符串
   （含 `plugin_manifest`），它就必须真的能释放**——空实现 = 每次加载漏一段。
 - `plugin_free_handle` 不是给正常路径用的：它是"ABI 版本对不上、不能调 `plugin_stop`"
-  时唯一安全的收尾方式。
+  时唯一安全的收尾方式。**签名永久冻结**——只接 `PluginHandle`、不碰 VTable，宿主才敢在
+  一个"版本不认识的插件"上调用它；改签名等于让老宿主在未来的插件上乱调。
 - 七个符号之外的一切都是实现细节，宿主不看也不会调。
 
 ## 2. 内存所有权（五条硬规矩）
