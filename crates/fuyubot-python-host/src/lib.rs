@@ -1,6 +1,6 @@
 //! Python 脚本的中间插件。
 //!
-//! 宿主进程里它是 ABI 插件（`define_plugin!` 那四个符号 + 持有 `HostApi`）；
+//! 宿主进程里它是 ABI 插件（`define_plugin!` 展开出的那整套导出符号 + 持有 `HostApi`）；
 //! 脚本进程里它是原生后端（链接进来的 `fuyubot_bridge_*`，读写自己的 stdio）。
 //! 同一份 dll 两个进程各加载一次，走两条完全不同的代码路径（见设计文档 4.1）。
 

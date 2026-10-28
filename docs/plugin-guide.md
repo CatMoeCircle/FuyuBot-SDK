@@ -1,9 +1,11 @@
 # 插件开发指南
 
-结论先说：**一个插件 = 一个 cdylib**（`.dll` / `.so` / `.dylib`），四个导出符号
-`plugin_init` / `plugin_start` / `plugin_stop` / `plugin_free_string` 就是全部契约。
-Rust / C / C++ 直接写它；Python / JS 用 `fuyubot-sdk-script` 生成的胶水 cdylib
-去启动解释器。契约细节见 [`abi-contract.md`](abi-contract.md)。
+结论先说：**一个插件 = 一个 cdylib**（`.dll` / `.so` / `.dylib`），七个导出符号就是
+全部契约——`plugin_init` / `plugin_start` / `plugin_stop` / `plugin_free_string`
+（v3 四件套），加上 `plugin_manifest` / `fuyubot_abi_version` / `plugin_free_handle`
+（v4 新增）。**只有 `plugin_init` 是必需的**；`plugin_manifest` 决定依赖能不能被
+宿主在装载前读到。Rust / C / C++ 直接写它；Python / JS 用 `fuyubot-sdk-script`
+生成的胶水 cdylib 去启动解释器。契约细节见 [`abi-contract.md`](abi-contract.md)。
 
 ## 0. 通用流程
 
@@ -104,14 +106,14 @@ extern "C-unwind" fn on_update(_user: *mut std::ffi::c_void, payload: *const std
 define_plugin!(MyPlugin, "demo");
 ```
 
-- `define_plugin!` **一个 crate 只能展开一次**（四个符号名是 ABI 定死的）。
+- `define_plugin!` **一个 crate 只能展开一次**（导出符号名是 ABI 定死的）。
 - 回调签名必须 `extern "C-unwind"`：`extern "C"` 边界上逃出去的 panic 直接 abort。
 - 回调没有捕获环境，状态经 `user_data` 传（示例见 [`../examples/rust-echo`](../examples/rust-echo)）。
 
 ## 2. C
 
 `fuyubot-sdk init ping --lang c` 会写出 `ping.c` 与 `fuyubot_plugin.h`。
-四个导出符号的骨架（完整模板见 `crates/fuyubot-sdk-cli/templates/c/plugin.c`，逻辑是 `/ping` → 回 `pong`）：
+导出符号的骨架（完整模板见 `crates/fuyubot-sdk-cli/templates/c/plugin.c`，逻辑是 `/ping` → 回 `pong`）：
 
 ```c
 #include "fuyubot_plugin.h"
@@ -134,13 +136,25 @@ FUYUBOT_EXPORT PluginHandle plugin_init(const HostApiVTable *host) {
     return handle;
 }
 
+/* ABI v4：自描述，宿主在 plugin_init **之前**读它来定依赖顺序。
+   必须新分配（宿主读完会用 plugin_free_string 归还），不能返回静态字符串；
+   两个列表留空 = 不声明依赖，宿主退回读配置段 [plugin.<名字>].inject。 */
+FUYUBOT_EXPORT const char *plugin_manifest(void) {
+    static const char BODY[] = "{\"name\":\"ping\",\"version\":\"0.1.0\","
+                               "\"inject\":[],\"soft_inject\":[]}";
+    char *copy = (char *)malloc(sizeof(BODY));
+    if (copy == NULL) return NULL;
+    memcpy(copy, BODY, sizeof(BODY));      /* sizeof 含结尾 NUL */
+    return copy;
+}
+
 FUYUBOT_EXPORT int32_t plugin_start(PluginHandle handle, const char *config_json) {
     SubscriptionHandle s = g_host->on(g_host->host_ctx, "updateNewMessage", NULL, on_update, NULL);
     return s.id == 0 ? -1 : 0;
 }
 
 FUYUBOT_EXPORT void plugin_stop(PluginHandle handle) { g_host = NULL; }
-FUYUBOT_EXPORT void plugin_free_string(char *ptr) { (void)ptr; }
+FUYUBOT_EXPORT void plugin_free_string(char *ptr) { free(ptr); }  /* 真的释放 */
 ```
 
 - `#define ABI_VERSION` 来自 `fuyubot_plugin.h`（cbindgen 从 Rust 定义生成，不要手改）。
@@ -152,12 +166,13 @@ FUYUBOT_EXPORT void plugin_free_string(char *ptr) { (void)ptr; }
   ⚠️ MSVC 的 `/utf-8` **必须给**：源码与生成的头文件都是 UTF-8，不加会按系统代码页读，
   中文注释被拆坏成「注释提前结束、后面全是语法错误」这种看不出原因的样子。
 - `plugin_start` / `plugin_stop` 可省略（只登记元数据的插件可以不写）；
-  `plugin_init` 与 `plugin_free_string` 必须有。
+  `plugin_init` 必须有。`plugin_manifest` 可省略，但省了就只能靠配置段声明依赖；
+  只要导出了它，`plugin_free_string` 就必须**真的能释放**（空实现 = 每次加载漏一段）。
 - 模板里那段 JSON 取值是**朴素查找**，不处理转义、不处理同名嵌套键；认真写就引一个 JSON 库。
 
 ## 3. C++
 
-同 C，**头文件同一份**，唯一差别是四个导出符号必须放在 `extern "C"` 里——
+同 C，**头文件同一份**，唯一差别是导出符号必须放在 `extern "C"` 里——
 C++ 会改函数名，宿主就 dlsym 不到了。其余差异只是用 `std::string` 拼 JSON。
 完整模板见 `templates/cpp/plugin.cpp`。编译同 C，也是两步：
 `fuyubot-sdk codegen --lang cpp --dir <工程目录>` → 你自己的 C++ 工具链（`cl /LD` / `g++ -shared`）。
@@ -169,6 +184,19 @@ C++ 会改函数名，宿主就 dlsym 不到了。其余差异只是用 `std::st
 ```rust
 fuyubot_sdk_script::script_plugin!("demo", python, "demo.py");
 ```
+
+**依赖只能声明在这一行里**——`plugin_manifest` 在 `plugin_init` **之前**被宿主读，
+那时脚本进程还没起，所以在 `.py` 里写依赖不会被任何人看到：
+
+```rust
+// inject = 硬依赖（缺了不激活）；soft_inject = 软依赖（缺了照常加载，有了优先排前面）
+fuyubot_sdk_script::script_plugin!("demo", python, "demo.py",
+    inject = ["storage.mongo"], soft_inject = ["media.ffmpeg"]);
+```
+
+⚠️ 一旦在这里声明了某一侧，`fuyubot.toml` 里 `[plugin.demo]` 对应的那一侧就**静默失效**
+（manifest 优先，不是合并）。改依赖要重编这个胶水 cdylib——这是 ABI 层面的硬边界，
+换来的是「换台机器不用再抄一遍配置」。
 
 生成的 `demo.py`（模板 `templates/python/plugin.py`）：
 
@@ -221,6 +249,8 @@ host.run();
 
 - 可用的函数：`log` / `on` / `off` / `invoke` / `emit` / `registerTool` / `config` / `run`。
   类型声明在 `fuyubot_plugin.d.ts`。
+- 依赖声明与 Python 段完全相同，只是关键字换 `js`：
+  `script_plugin!("demo", js, "demo.js", inject = ["a.b"], soft_inject = ["c.d"])`。
 - **`params` / `request` 里嵌的 TDLib 对象，判别字段可以写 `_`**（等价于 `"@type"`）：
   桥在发往宿主之前递归换回来，嵌套多深、`vector<T>` 里的对象都算。同时写了两个时
   以 `"@type"` 为准。宿主不会替脚本补判别字段，所以这一步必须在 JS 侧做完。
