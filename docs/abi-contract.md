@@ -107,13 +107,28 @@
 |---|---|---|
 | 事件 | `on` / `off` / `emit` | 订阅按 `@type` 或 `update` 兜底通道；`emit` 在插件侧被桥成 **scoped**：只送"自己 + 全局订阅者" |
 | 工具 | `register_tool` / `call_tool` / `call_tool_result` / `list_tools` | `call_tool` 是请求号异步路径，`call_tool_result` 同步返回结果（失败是 `{"error":…}`） |
-| 服务 | `provide_service` / `get_service` | 按名字注册 / 解析；`get_service` 返回 `ServiceVTable *` |
+| 服务 | `provide_service` / `provide_service_shared` / `get_service` | 注册到**调用者自己的作用域**（默认私有）/ 注册到**进程级**（跨插件共享）/ 解析（沿父链向上） |
 | TDLib | `td_invoke` / `td_invoke_simplified` / `td_execute` | 前两个发请求（拿 `RequestId`），`td_execute` 是同步的纯函数 |
 | 管线 | `use_middleware` | 插到六阶段管线的某个 stage |
 | 等待 | `wait_for_update` / `cancel_wait` | **阻塞**当前线程；异步形态见 `ResponseRouter`（Rust 侧） |
 | 诊断 | `log` / `get_config` / `set_config` / `list_plugins` | `get_config` 能读任意段，`set_config` 只能写自己那段（宿主按 `owner_names` 判定，插件伪造不了） |
 
 逐字段的签名以 `fuyubot_plugin.h` 为准（`cbindgen` 产出，带完整注释）。
+
+### 服务作用域
+
+每个插件在加载时拿到**自己的一层 `Context`**，所以：
+
+- `provide_service` 注册的服务**只有本插件（和更深的子作用域）看得见**——默认私有。
+  两个插件注册同名服务**不冲突**，各用各的实现。
+- 根上的公共服务（宿主注册的那四个机制：事件总线 / 服务容器 / 工具表 / 中间件管线）
+  照样能查到，因为查找沿父链向上。
+- 要跨插件共享才用 `provide_service_shared`：它写进程级的根表，同名会和别人撞
+  （直接报 `ServiceNameExists`），所以只在真要共享时用。
+- 插件卸载时，它那层作用域连同里面的服务一起消失。
+
+为什么不加一个 `bool shared` 参数：作用域的边界是**安全属性**，写 `_shared` 的那一行
+必须显眼，藏在一个布尔里早晚会有人填错。
 
 ## 6. 为什么没有可变参数函数指针
 
