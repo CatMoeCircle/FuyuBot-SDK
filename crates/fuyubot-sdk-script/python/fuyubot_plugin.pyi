@@ -5,7 +5,8 @@
 `crates/fuyubot-loader/src/runtime.rs`。
 """
 
-from typing import Any, Callable, Dict, List, Optional, Union
+from asyncio import Future
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 #: 负载/回调里能看到的 JSON 值。
 Json = Union[None, bool, int, float, str, List[Any], Dict[str, Any]]
@@ -37,10 +38,21 @@ def invoke(
     params: Optional[Dict[str, Any]] = None,
     on_response: Optional[Handler] = None,
 ) -> int:
-    """宿主 `HostApiVTable::td_invoke_simplified`。
+    """宿主 `HostApiVTable::td_invoke_simplified`（回调版）。
 
     `method` 是 TDLib 的方法名（如 `"sendMessage"`），`params` 是除 `@type`
     之外的参数。返回脚本侧的 tag；给了 `on_response` 就按 `request_id` 配对回调。
+    """
+    ...
+
+def invoke_async(
+    method: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Future:
+    """`invoke` 的 `await` 版：只能在 `run_async(...)` 的 loop 里用。
+
+    TDLib 的业务错误（`@type: "error"`）也会 resolve，自己判 `response["@type"]`；
+    宿主拒绝请求才抛异常。
     """
     ...
 
@@ -90,6 +102,10 @@ def wait_for_update(
     """宿主 `HostApiVTable::wait_for_update`：阻塞等一条匹配的更新。"""
     ...
 
+def wait_async(filter: Dict[str, Any], timeout_ms: int = 0) -> Future:
+    """`wait_for_update` 的 `await` 版：只能在 `run_async(...)` 里用；超时返回 `None`。"""
+    ...
+
 def get_service(
     name: str,
     on_service: Optional[Callable[[Optional[Dict[str, Any]]], None]] = None,
@@ -132,4 +148,11 @@ def set_config(
 
 def run() -> None:
     """开始读宿主的行并分发。插件的最后一行永远是这个。"""
+    ...
+
+def run_async(main: Optional[Callable[[], Awaitable[None]]] = None) -> None:
+    """asyncio 版 `run()`：事件循环 + 后台 stdin 读取，支持 `await`。
+
+    `main` 是 async 函数（ready 之后作为任务启动）；不传就只跑事件循环。
+    """
     ...

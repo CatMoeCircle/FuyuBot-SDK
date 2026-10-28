@@ -16,6 +16,7 @@
 类型声明见同目录的 `fuyubot_plugin.pyi`。
 """
 
+import asyncio
 import json
 import sys
 import threading
@@ -38,6 +39,10 @@ _pending_invokes = {}     # tag -> 回调（等宿主把请求号回执给我们
 _pending_middlewares = {}  # tag -> 回调（等宿主把中间件号回执给我们）
 _pending_replies = {}     # tag -> 回调（等宿主的同步回执：listTools/execute/wait/getService/callService）
 _response_handlers = {}   # request_id -> 回调
+# ── async/await 版（asyncio.Future 包装；内部仍是 tag/request_id 协议）──────
+_pending_async_invokes = {}   # tag -> Future（等 invoked 回执）
+_async_response_futures = {}  # request_id -> Future
+_pending_async_waits = {}     # tag -> Future（等 wait 回执）
 _response_channel = [False]
 _next_tag = 1
 
@@ -122,6 +127,27 @@ def invoke(method, params=None, on_response=None):
     return tag
 
 
+def invoke_async(method, params=None):
+    """`invoke` 的 `await` 版：发请求并等它自己的响应。
+
+    只能在 [`run_async`] 的事件循环里调（普通 `run()` 没有 loop）：
+
+        async def main():
+            me = await host.invoke_async("getMe", {})
+        host.run_async(main)
+
+    TDLib 的业务错误（`@type: "error"`）也会 resolve，自己判 `response["@type"]`；
+    只有宿主拒绝请求才抛异常。
+    """
+    loop = asyncio.get_running_loop()
+    _ensure_response_channel()
+    tag = _new_tag()
+    future = loop.create_future()
+    _pending_async_invokes[tag] = future
+    _send({"op": "invoke", "tag": tag, "method": method, "params": params or {}})
+    return future
+
+
 def emit(event, payload=None):
     """发一条自定义事件（其他插件订阅得到）。"""
     _send({"op": "emit", "event": event, "payload": payload})
@@ -179,6 +205,20 @@ def wait_for_update(filter, timeout_ms=0, on_match=None):
         _pending_replies[tag] = lambda msg: on_match(msg.get("payload"))
     _send({"op": "wait", "tag": tag, "filter": filter, "timeout_ms": timeout_ms})
     return tag
+
+
+def wait_async(filter, timeout_ms=0):
+    """`wait_for_update` 的 `await` 版：等一条匹配的更新（只能在 `run_async` 里用）。
+
+    超时/取消返回 `None`；宿主报错抛异常。底层仍由宿主在独立线程里等，
+    asyncio 事件循环照常跑。
+    """
+    loop = asyncio.get_running_loop()
+    tag = _new_tag()
+    future = loop.create_future()
+    _pending_async_waits[tag] = future
+    _send({"op": "wait", "tag": tag, "filter": filter, "timeout_ms": timeout_ms})
+    return future
 
 
 def get_service(name, on_service=None):
@@ -279,13 +319,34 @@ def _dispatch(message):
         if handler is not None:
             _middleware_handlers.setdefault(message.get("handle"), []).append(handler)
     elif op == "invoked":
+        future = _pending_async_invokes.pop(message.get("tag"), None)
+        if future is not None:
+            if not future.done():
+                _async_response_futures[message.get("request_id")] = future
+            return
         handler = _pending_invokes.pop(message.get("tag"), None)
         if handler is not None:
             _response_handlers[message.get("request_id")] = handler
+    elif op == "wait":
+        future = _pending_async_waits.pop(message.get("tag"), None)
+        if future is not None:
+            if not future.done():
+                future.set_result(message.get("payload"))
+            return
+        handler = _pending_replies.pop(message.get("tag"), None)
+        if handler is not None:
+            handler(message)
     elif op == "error":
+        future = _pending_async_invokes.pop(message.get("tag"), None)
+        if future is None:
+            future = _pending_async_waits.pop(message.get("tag"), None)
+        if future is not None:
+            if not future.done():
+                future.set_exception(RuntimeError(str(message.get("message"))))
+            return
         log("宿主报错：" + str(message.get("message")), level="error")
     elif "tag" in message:
-        # 其余带 tag 的回执（listTools / execute / wait / getService / callService）。
+        # 其余带 tag 的回执（listTools / execute / getService / callService）。
         handler = _pending_replies.pop(message.get("tag"), None)
         if handler is not None:
             handler(message)
@@ -294,9 +355,24 @@ def _dispatch(message):
 def _deliver_response(payload):
     if not isinstance(payload, dict):
         return
+    future = _async_response_futures.pop(payload.get("request_id"), None)
+    if future is not None:
+        if not future.done():
+            future.set_result(payload)
+        return
     handler = _response_handlers.pop(payload.get("request_id"), None)
     if handler is not None:
         handler(payload)
+
+
+def _dispatch_line(line):
+    line = line.strip()
+    if not line:
+        return
+    try:
+        _dispatch(json.loads(line))
+    except ValueError:
+        log("收到一行不是 JSON 的内容：" + line, level="error")
 
 
 def run():
@@ -304,16 +380,47 @@ def run():
 
     这一行必须在**所有 `on(...)` 之后**：宿主会等收到 `{"op":"ready"}` 才认为
     插件加载完成，而 `plugin_start` 也要等它——脚本早退会被判成加载失败。
+
+    要用 `await` 的话改用 [`run_async`]（普通 `run()` 没有 asyncio 事件循环）。
     """
     _send({"op": "ready"})
     for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+        _dispatch_line(line)
+
+
+def run_async(main=None):
+    """asyncio 版 `run()`：事件循环 + 后台 stdin 读取，支持 `await`。
+
+    ```python
+    async def main():
+        me = await host.invoke_async("getMe", {})
+
+    host.run_async(main)
+    ```
+
+    `main` 是 async 函数（在 ready 之后作为任务启动）；不传就只跑事件循环、
+    让 `on(...)` 回调自己 `asyncio.create_task(...)`。和 `run()` 一样，这个调用
+    会一直阻塞到宿主关掉管道。
+    """
+    _send({"op": "ready"})
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def reader():
         try:
-            _dispatch(json.loads(line))
-        except ValueError:
-            log("收到一行不是 JSON 的内容：" + line, level="error")
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(_dispatch_line, line)
+        finally:
+            # 管道关了：停循环，run_async 返回。
+            loop.call_soon_threadsafe(loop.stop)
+
+    threading.Thread(target=reader, name="fuyubot-stdin", daemon=True).start()
+    if main is not None:
+        loop.create_task(main())
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
 
 
 def _selftest():
@@ -387,6 +494,36 @@ def _selftest():
     _pending_replies[st] = lambda msg: seen.append(("set", msg.get("op")))
     _dispatch({"op": "setConfig", "tag": st})
     assert seen[-1] == ("set", "setConfig"), seen
+
+    # invoke_async / wait_async：Future 包装（在临时 loop 里跑一遍）。
+    async def check_async():
+        pending = invoke_async("getMe", {})
+        async_tag = list(_pending_async_invokes)[-1]
+        _dispatch({"op": "invoked", "tag": async_tag, "request_id": 123})
+        _deliver_response({"request_id": 123, "@type": "user", "id": 7})
+        response = await pending
+        assert response["@type"] == "user" and response["id"] == 7, response
+
+        waiting = wait_async({"@type": "updateNewMessage"}, 10)
+        wait_tag = list(_pending_async_waits)[-1]
+        _dispatch({"op": "wait", "tag": wait_tag, "payload": {"@type": "updateNewMessage"}})
+        update = await waiting
+        assert update is not None and update["@type"] == "updateNewMessage", update
+
+        failing = invoke_async("noSuchMethod", {})
+        failing_tag = list(_pending_async_invokes)[-1]
+        _dispatch({"op": "error", "tag": failing_tag, "message": "没有这个方法"})
+        try:
+            await failing
+            raise AssertionError("宿主拒绝时 invoke_async 必须抛异常")
+        except RuntimeError as error:
+            assert "没有这个方法" in str(error), error
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(check_async())
+    finally:
+        loop.close()
 
     print("fuyubot_plugin: self-test ok")
 
