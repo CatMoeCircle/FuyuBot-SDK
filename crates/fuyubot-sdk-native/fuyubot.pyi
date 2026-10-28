@@ -4,7 +4,8 @@
 实现是同目录的 `fuyubot.py`。
 """
 
-from typing import Any, Callable, Dict, Optional
+from asyncio import Future
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 # 负载 / 回调里能看到的 JSON 值。
 Json = Any
@@ -14,11 +15,16 @@ def on(
     event: str,
     handler: Callable[[Json], None],
     filter: Optional[Dict[str, Json]] = None,
-) -> None:
+) -> Any:
     """订阅一条事件。收到时 ``handler(payload)``，``payload`` 是解析好的 dict。
 
-    对应 C ABI 的 ``fuyubot_bridge_on``。
+    对应 C ABI 的 ``fuyubot_bridge_on``。返回底层回调对象（可传给 ``off``）。
     """
+    ...
+
+
+def off(callback: Any) -> None:
+    """退订 ``on`` 返回的回调对象。"""
     ...
 
 
@@ -31,6 +37,22 @@ def invoke(
 
     对应 C ABI 的 ``fuyubot_bridge_invoke``。
     """
+    ...
+
+
+def invoke_async(
+    method: str,
+    params: Optional[Dict[str, Json]] = None,
+) -> Future:
+    """``invoke`` 的 ``await`` 版：只能在 ``run_async`` 的 loop 里用。"""
+    ...
+
+
+def wait_async(
+    filter: Optional[Dict[str, Json]] = None,
+    timeout_ms: int = 0,
+) -> Future:
+    """等一条匹配的更新；``timeout_ms == 0`` 表示一直等。超时/取消返回 ``None``。"""
     ...
 
 
@@ -63,4 +85,9 @@ def use_middleware(stage: int, handler: Callable[[int, Json], None]) -> None:
 
 def run() -> None:
     """发 ready 握手，然后阻塞读 stdin 直到进程结束。永远是脚本最后一行。"""
+    ...
+
+
+def run_async(main: Optional[Callable[[], Awaitable[None]]] = None) -> None:
+    """asyncio 版 ``run()``：原生桥后台读 stdin，主线程跑事件循环。"""
     ...

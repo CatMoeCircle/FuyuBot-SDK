@@ -20,8 +20,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 from typing import Any, Callable, Dict, Optional
 
 import ctypes
@@ -145,10 +147,11 @@ def _encode(value: Any) -> Optional[bytes]:
 # ---------------------------------------------------------------------------
 
 
-def on(event: str, handler: Callable[[Any], None], filter: Optional[Dict] = None) -> None:
+def on(event: str, handler: Callable[[Any], None], filter: Optional[Dict] = None) -> CALLBACK:
     """订阅一条事件。收到时 ``handler(payload)``，``payload`` 是解析好的 dict。
 
-    ``filter`` 可选，做字段匹配（``{"chat_id": 123}``）。
+    ``filter`` 可选，做字段匹配（``{"chat_id": 123}``）。返回底层回调对象，
+    可传给 [`off`]；大多数作者不需要它。
     """
     def trampoline(user_data, payload: bytes):
         # user_data 没用到：Python 侧 handler 已由闭包捕获，不需要回传。
@@ -162,6 +165,12 @@ def on(event: str, handler: Callable[[Any], None], filter: Optional[Dict] = None
         cb,
         None,  # user_data：不用，闭包已捕获 handler
     )
+    return cb
+
+
+def off(callback: CALLBACK) -> None:
+    """退订 [`on`] 返回的回调对象。一般用不到；``wait_async`` 超时/命中时会自己退订。"""
+    _lib.fuyubot_bridge_off(callback, None)
 
 
 def invoke(
@@ -187,6 +196,67 @@ def invoke(
         cb,
         None,
     )
+
+
+def _set_future_result(future, value) -> None:
+    if not future.done():
+        future.set_result(value)
+
+
+def invoke_async(method: str, params: Optional[Dict] = None):
+    """``invoke`` 的 ``await`` 版：发请求并等它自己的响应。
+
+    只能在 [`run_async`] 的事件循环里用：
+
+        async def main():
+            me = await invoke_async("getMe", {})
+
+        run_async(main)
+
+    TDLib 的业务错误（``@type: "error"``）也会 resolve；只有宿主拒绝请求才 reject——
+    和 JS 的 ``invokeAsync`` 同一语义。
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def response(payload):
+        # `invoke` 的 trampoline 已经解码成 Python 对象；原生桥在 run 线程上回调，
+        # 必须 marshal 回事件循环线程再 set_result。
+        loop.call_soon_threadsafe(_set_future_result, future, payload)
+
+    invoke(method, params, response)
+    return future
+
+
+def wait_async(filter: Optional[Dict] = None, timeout_ms: int = 0):
+    """``await`` 一条匹配的更新（不阻塞事件循环）。
+
+    ``timeout_ms == 0`` 表示一直等；超时/取消返回 ``None``。实现是一条**一次性**
+    ``on("update", ...)`` 订阅：命中或超时后立刻退订。
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    holder: list = []
+    timer: list = [None]
+
+    def finish(payload):
+        if future.done():
+            return
+        future.set_result(payload)
+        if timer[0] is not None:
+            timer[0].cancel()
+        if holder:
+            off(holder[0])
+
+    def handler(payload):
+        loop.call_soon_threadsafe(finish, payload)
+
+    holder.append(on("update", handler, filter))
+    if timeout_ms:
+        timer[0] = loop.call_later(timeout_ms / 1000.0, lambda: finish(None))
+    # 调用方 cancel 掉 future 时也要退订，不能把一次性订阅留成永久泄漏。
+    future.add_done_callback(lambda _: off(holder[0]) if holder and future.cancelled() else None)
+    return future
 
 
 def emit(event: str, payload: Any = None) -> None:
@@ -223,6 +293,39 @@ def run() -> None:
     """发 ready 握手，然后阻塞读 stdin 直到进程结束。永远是脚本最后一行。"""
     _lib.fuyubot_bridge_connect()
     _lib.fuyubot_bridge_run()
+
+
+def run_async(main=None) -> None:
+    """asyncio 版 ``run()``：原生桥在后台线程读 stdin，主线程跑事件循环。
+
+    ```python
+    async def main():
+        me = await invoke_async("getMe", {})
+
+    run_async(main)
+    ```
+
+    ``main`` 是 async 函数；不传就只跑事件循环，让 ``on(...)`` 回调自己
+    ``asyncio.create_task(...)``。这个调用会一直阻塞到宿主关掉管道。
+    """
+    _lib.fuyubot_bridge_connect()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def pump():
+        try:
+            _lib.fuyubot_bridge_run()
+        finally:
+            # 管道关了：停循环，run_async 返回。
+            loop.call_soon_threadsafe(loop.stop)
+
+    threading.Thread(target=pump, name="fuyubot-native", daemon=True).start()
+    if main is not None:
+        loop.create_task(main())
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------

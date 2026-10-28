@@ -10,7 +10,8 @@
 
 - `src/lib.rs` — 原生桥本体（协议状态机 + `fuyubot_bridge_*` C 导出）。
   冻结的 C ABI 见文件头注释。
-- `fuyubot.py` — Python 薄 SDK（ctypes 封装）。作者 `from fuyubot import on, run`。
+- `fuyubot.py` — Python 薄 SDK（ctypes 封装）。作者 `from fuyubot import on, run`；
+  另有 `run_async` / `invoke_async` / `wait_async` 的 asyncio 版。
 - `fuyubot.pyi` — Python 薄 SDK 的类型存根。
 - `fuyubot.ts` — TS/JS 薄 SDK（bun:ffi 封装）。作者 `import { on, run } from "./fuyubot"`。
 - `fuyubot.d.ts` — TS 薄 SDK 的类型存根。
@@ -32,3 +33,7 @@ Python 的 ctypes 则没有这些坑（`CFUNCTYPE` + `c_char_p` 都自动处理�
 `cargo test -p fuyubot-sdk-native` 用假 stdio 离线单测协议状态机；薄 SDK 各自带
 `_selftest`（直接跑 `python fuyubot.py` / `bun fuyubot.ts`，需设 `FUYUBOT_NATIVE_LIB`
 指向编好的 dll）。
+
+`tests/python_async.rs` 会起一个**真的 Python 进程**跑 `run_async`，用 stdin/stdout
+扮演 `fuyubot-python-host`，断言 `invoke_async` / `wait_async` 都能从 await 里返回；
+没有 Python 解释器时跳过。
