@@ -72,6 +72,9 @@ interface Bridge {
       user_data: ptr | null,
     ): number;
     fuyubot_bridge_run(): void;
+    fuyubot_bridge_start(): number;
+    fuyubot_bridge_step(): number;
+    fuyubot_bridge_running(): number;
   };
   close(): void;
 }
@@ -99,6 +102,9 @@ function lib(): Bridge {
         returns: "u64",
       },
       fuyubot_bridge_run: { args: [], returns: "void" },
+      fuyubot_bridge_start: { args: [], returns: "i32" },
+      fuyubot_bridge_step: { args: [], returns: "i32" },
+      fuyubot_bridge_running: { args: [], returns: "i32" },
     }) as unknown as Bridge;
   }
   return _lib;
@@ -159,12 +165,15 @@ function canonicalize(value: Json, path: Set<Json> = new Set()): Json {
   return out;
 }
 
-/** 订阅一条事件。收到时 `handler(payload)`，`payload` 是解析好的对象。 */
+/** 订阅一条事件。收到时 `handler(payload)`，`payload` 是解析好的对象。
+ *
+ * 返回底层 JSCallback，可传给 {@link off}；大多数作者不需要它。
+ */
 export function on(
   event: string,
   handler: (payload: Json) => void,
   filter?: Record<string, Json>,
-): void {
+): JSCallback {
   const cb = _keep(
     new JSCallback(
       (_userData: ptr, payload: ptr) => handler(_decode(payload)),
@@ -177,6 +186,12 @@ export function on(
     cb,
     null,
   );
+  return cb;
+}
+
+/** 退订 {@link on} 返回的回调。一般用不到；`waitAsync` 会自己退订。 */
+export function off(callback: JSCallback): void {
+  lib().symbols.fuyubot_bridge_off(callback, null);
 }
 
 /** 发一条 TDLib 请求。给 `onResponse` 就按请求配对回调。
@@ -204,6 +219,45 @@ export function invoke(
     cb,
     null,
   );
+}
+
+/** `invoke` 的 `await` 版：发请求并等它自己的响应。
+ *
+ * 只能在 {@link runAsync} 的事件循环里用。TDLib 业务错误（`@type: "error"`）
+ * 也会 resolve；只有宿主拒绝请求才 reject。
+ */
+export function invokeAsync(
+  method: string,
+  params?: Record<string, Json>,
+): Promise<Json> {
+  return new Promise((resolve) => {
+    invoke(method, params, resolve);
+  });
+}
+
+/** `await` 一条匹配的更新（不阻塞事件循环）。
+ *
+ * `timeoutMs=0` 表示一直等；超时/取消返回 `null`。实现是一条一次性
+ * `on("update", ...)` 订阅，命中或超时后自动退订。
+ */
+export function waitAsync(
+  filter?: Record<string, Json>,
+  timeoutMs: number = 0,
+): Promise<Json | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    let callback: JSCallback | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (value: Json | null) => {
+      if (done) return;
+      done = true;
+      if (timer !== null) clearTimeout(timer);
+      if (callback !== null) off(callback);
+      resolve(value);
+    };
+    callback = on("update", (payload) => finish(payload), filter);
+    if (timeoutMs > 0) timer = setTimeout(() => finish(null), timeoutMs);
+  });
 }
 
 /** 发一条自定义事件。 */
@@ -250,6 +304,36 @@ export function useMiddleware(
 export function run(): void {
   lib().symbols.fuyubot_bridge_connect();
   lib().symbols.fuyubot_bridge_run();
+}
+
+/** asyncio 版 `run()`：原生桥在后台线程读 stdin，JS 事件循环继续跑。
+ *
+ * ```ts
+ * async function main() {
+ *   const me = await invokeAsync("getMe", {});
+ * }
+ * await runAsync(main);
+ * ```
+ *
+ * `main` 可省；不传就只跑事件循环，让 `on(...)` 回调自己起异步任务。
+ * 这个 Promise 在 stdin 关闭（宿主停插件）后 resolve。
+ */
+export async function runAsync(main?: () => Promise<void>): Promise<void> {
+  lib().symbols.fuyubot_bridge_connect();
+  lib().symbols.fuyubot_bridge_start();
+  const task = main ? main() : Promise.resolve();
+
+  // `main` 可能在等响应，所以不能先 `await main()`：必须同时用 `step()` 在
+  // **主线程**上分发输入（回调在别的线程调会崩，payload 指针也只有当前行有效）。
+  const pump = (async () => {
+    for (;;) {
+      const code = lib().symbols.fuyubot_bridge_step();
+      if (code < 0) return;
+      if (code === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  })();
+
+  await Promise.all([task, pump]);
 }
 
 // ---------------------------------------------------------------------------

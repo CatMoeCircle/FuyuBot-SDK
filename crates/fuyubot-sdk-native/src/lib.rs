@@ -40,10 +40,16 @@
 //!                                        FuyubotMiddlewareCallback callback,
 //!                                        void *user_data);
 //! void     fuyubot_bridge_run(void);
+//!
+//! // async 版（JS runAsync）：后台线程读 stdin 入队，主线程 step 分发
+//! int32_t  fuyubot_bridge_start(void);
+//! int32_t  fuyubot_bridge_step(void);    // 1 处理一行 / 0 暂时没数据 / -1 EOF
+//! int32_t  fuyubot_bridge_running(void);
 //! ```
 //!
 //! 调用顺序（脚本作者视角，由薄 SDK 转成这些调用）：
 //! `on` / `invoke` / …（注册）→ `connect`（发 `ready` 握手）→ `run`（阻塞读 stdin）。
+//! `runAsync` 走 `start` + `step`：回调在**调用 step 的线程**上触发，不会跨线程碰 JS。
 //!
 //! ## 线程模型
 //!
@@ -51,7 +57,7 @@
 //! `fuyubot_plugin.js` 的 `run()` 一致。S0 已验证 ctypes 与 bun:ffi 的回调都能在
 //! 非主线程被调用。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -628,6 +634,70 @@ pub unsafe extern "C" fn fuyubot_bridge_use_middleware(
 #[unsafe(no_mangle)]
 pub extern "C" fn fuyubot_bridge_run() {
     bridge().run_stdin();
+}
+
+/// `run` 的后台线程版本：起线程把 stdin 的行**排队**，由 [`fuyubot_bridge_step`]
+/// 在调用者线程（JS 主线程）上逐行分发。
+///
+/// 为什么不直接在后台线程调回调：bun 的 JSCallback 不是线程安全的，threadsafe
+/// 回调又会在入队后执行——payload 指针那时已经被复用。排队 + 主线程 step 最稳。
+/// 重复调用是幂等的。
+static INPUT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static INPUT_EOF: AtomicBool = AtomicBool::new(false);
+static READER_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fuyubot_bridge_start() -> i32 {
+    if READER_STARTED.swap(true, Ordering::SeqCst) {
+        return 0;
+    }
+    std::thread::spawn(|| {
+        let stdin = std::io::stdin();
+        for line in BufReader::new(stdin.lock()).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            INPUT_QUEUE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(line.to_owned());
+        }
+        INPUT_EOF.store(true, Ordering::SeqCst);
+    });
+    0
+}
+
+/// 在**调用者线程**上处理一行排队输入：1 = 处理了一行，0 = 暂时没数据，
+/// -1 = stdin 已关闭且队列已空。
+#[unsafe(no_mangle)]
+pub extern "C" fn fuyubot_bridge_step() -> i32 {
+    let line = INPUT_QUEUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front();
+    if let Some(line) = line {
+        bridge().handle_line(&line);
+        return 1;
+    }
+    if INPUT_EOF.load(Ordering::SeqCst) {
+        -1
+    } else {
+        0
+    }
+}
+
+/// 输入线程是否还在工作（队列非空或 stdin 尚未 EOF）。
+#[unsafe(no_mangle)]
+pub extern "C" fn fuyubot_bridge_running() -> i32 {
+    let pending = !INPUT_QUEUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+    (!INPUT_EOF.load(Ordering::SeqCst) || pending) as i32
 }
 
 #[cfg(test)]

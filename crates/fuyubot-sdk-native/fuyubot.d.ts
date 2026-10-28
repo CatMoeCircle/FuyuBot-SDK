@@ -17,12 +17,15 @@ export type Json =
 /** 事件 / 响应回调：收到一条事件（已解析成对象）的负载。 */
 export type Handler = (payload: Json) => void;
 
-/** 订阅一条事件。对应 `fuyubot_bridge_on`。 */
+/** 订阅一条事件。对应 `fuyubot_bridge_on`；返回底层回调对象（可传给 `off`）。 */
 export declare function on(
   event: string,
   handler: Handler,
   filter?: { [key: string]: Json },
-): void;
+): unknown;
+
+/** 退订 `on` 返回的回调。 */
+export declare function off(callback: unknown): void;
 
 /** 发一条 TDLib 请求。给 `onResponse` 就按请求配对回调。对应 `fuyubot_bridge_invoke`。 */
 export declare function invoke(
@@ -30,6 +33,18 @@ export declare function invoke(
   params?: { [key: string]: Json },
   onResponse?: Handler,
 ): void;
+
+/** `invoke` 的 `await` 版：只能在 `runAsync` 的事件循环里用。 */
+export declare function invokeAsync(
+  method: string,
+  params?: { [key: string]: Json },
+): Promise<Json>;
+
+/** 等一条匹配的更新；`timeoutMs=0` 表示一直等。超时/取消返回 `null`。 */
+export declare function waitAsync(
+  filter?: { [key: string]: Json },
+  timeoutMs?: number,
+): Promise<Json | null>;
 
 /** 发一条自定义事件。对应 `fuyubot_bridge_emit`。 */
 export declare function emit(event: string, payload?: Json): void;
@@ -52,3 +67,6 @@ export declare function useMiddleware(
 
 /** 发 ready 握手，然后阻塞读 stdin 直到进程结束。永远是脚本最后一行。 */
 export declare function run(): void;
+
+/** asyncio 版 `run()`：原生桥后台读 stdin，JS 事件循环继续跑。 */
+export declare function runAsync(main?: () => Promise<void>): Promise<void>;

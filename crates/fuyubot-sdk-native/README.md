@@ -13,7 +13,8 @@
 - `fuyubot.py` — Python 薄 SDK（ctypes 封装）。作者 `from fuyubot import on, run`；
   另有 `run_async` / `invoke_async` / `wait_async` 的 asyncio 版。
 - `fuyubot.pyi` — Python 薄 SDK 的类型存根。
-- `fuyubot.ts` — TS/JS 薄 SDK（bun:ffi 封装）。作者 `import { on, run } from "./fuyubot"`。
+- `fuyubot.ts` — TS/JS 薄 SDK（bun:ffi 封装）。作者 `import { on, run } from "./fuyubot"`；
+  另有 `runAsync` / `invokeAsync` / `waitAsync` 的 async 版。
 - `fuyubot.d.ts` — TS 薄 SDK 的类型存根。
 
 薄 SDK 只做一件事：把语言回调转成 C 函数指针，把 C 传回的 JSON 解码成 dict / object。
@@ -36,4 +37,4 @@ Python 的 ctypes 则没有这些坑（`CFUNCTYPE` + `c_char_p` 都自动处理�
 
 `tests/python_async.rs` 会起一个**真的 Python 进程**跑 `run_async`，用 stdin/stdout
 扮演 `fuyubot-python-host`，断言 `invoke_async` / `wait_async` 都能从 await 里返回；
-没有 Python 解释器时跳过。
+没有 Python 解释器时跳过。`tests/js_async.rs` 对 bun 做同样的事（没有 bun 时跳过）。
