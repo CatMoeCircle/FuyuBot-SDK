@@ -40,6 +40,10 @@ const pendingInvokes = new Map(); // tag -> 回调（等宿主把请求号回执
 const pendingMiddlewares = new Map(); // tag -> 回调（等宿主把中间件号回执回来）
 const pendingReplies = new Map(); // tag -> 回调（等宿主的同步回执：listTools/execute/wait/getService/callService）
 const responseHandlers = new Map(); // request_id -> 回调
+// ── async/await 版（Promise 包装；内部仍然是上面那套 tag/request_id 协议）──────
+const pendingAsyncInvokes = new Map(); // tag -> {resolve, reject}
+const pendingAsyncWaits = new Map(); // tag -> {resolve, reject}
+const asyncResponseHandlers = new Map(); // request_id -> resolve
 let responseChannelOpen = false;
 let nextTag = 1;
 
@@ -167,6 +171,32 @@ function invoke(method, params, onResponse) {
   return tag;
 }
 
+/**
+ * `invoke` 的 `await` 版：发请求并等它自己的响应。
+ *
+ * 这是插件作者**首选**的请求方式（另一条是 `invoke(method, params, onResponse)` 回调）。
+ * 内部仍然是 `invoke` 的 tag/request_id 协议，只是把回调包成了 Promise；宿主侧不阻塞。
+ *
+ * ```js
+ * const me = await host.invokeAsync("getMe", {});
+ * const msg = await host.invokeAsync("sendMessage", {
+ *   chat_id: 7,
+ *   input_message_content: { _: "inputMessageText", text: { _: "formattedText", text: "hi" } },
+ * });
+ * ```
+ *
+ * TDLib 的业务错误（`@type: "error"`）也是 **resolve**，自己判 `response["@type"]`；
+ * 只有宿主拒绝请求（方法名非法、连接断开等）才 reject。
+ */
+function invokeAsync(method, params) {
+  ensureResponseChannel();
+  const tag = newTag();
+  return new Promise((resolve, reject) => {
+    pendingAsyncInvokes.set(tag, { resolve, reject });
+    send({ op: "invoke", tag, method, params: canonicalize(params || {}) });
+  });
+}
+
 /** 发一条自定义事件（其他插件订阅得到）。 */
 function emit(event, payload) {
   send({ op: "emit", event, payload });
@@ -247,6 +277,27 @@ function waitForUpdate(filter, timeoutMs, onMatch) {
   }
   send({ op: "wait", tag, filter, timeout_ms: timeoutMs || 0 });
   return tag;
+}
+
+/**
+ * `waitForUpdate` 的 `await` 版：等一条匹配的更新。
+ *
+ * ```js
+ * const update = await host.waitAsync({ "@type": "updateNewMessage" }, 30_000);
+ * if (update === null) {
+ *   // 超时（或宿主取消）
+ * }
+ * ```
+ *
+ * 返回 `null` 表示超时/取消；和回调版一样，底层由宿主在独立线程上执行阻塞等待，
+ * **脚本自己的事件循环照常跑**，所以可以放心 `await`。
+ */
+function waitAsync(filter, timeoutMs) {
+  const tag = newTag();
+  return new Promise((resolve, reject) => {
+    pendingAsyncWaits.set(tag, { resolve, reject });
+    send({ op: "wait", tag, filter, timeout_ms: timeoutMs || 0 });
+  });
 }
 
 /**
@@ -373,13 +424,46 @@ function dispatch(message) {
       middlewareHandlers.get(message.handle).push(handler);
     }
   } else if (message.op === "invoked") {
+    const async = pendingAsyncInvokes.get(message.tag);
+    if (async) {
+      pendingAsyncInvokes.delete(message.tag);
+      asyncResponseHandlers.set(message.request_id, async.resolve);
+      return;
+    }
     const handler = pendingInvokes.get(message.tag);
     if (handler) {
       pendingInvokes.delete(message.tag);
       responseHandlers.set(message.request_id, handler);
     }
   } else if (message.op === "error") {
+    // 带 tag 的失败先 reject 对应的 Promise（invokeAsync / waitAsync）；
+    // 老的回调式 API 没有错误回执通道，只能打日志。
+    const asyncInvoke = pendingAsyncInvokes.get(message.tag);
+    if (asyncInvoke) {
+      pendingAsyncInvokes.delete(message.tag);
+      asyncInvoke.reject(new Error(String(message.message)));
+      return;
+    }
+    const asyncWait = pendingAsyncWaits.get(message.tag);
+    if (asyncWait) {
+      pendingAsyncWaits.delete(message.tag);
+      asyncWait.reject(new Error(String(message.message)));
+      return;
+    }
     log("宿主报错：" + String(message.message), "error");
+  } else if (message.op === "wait") {
+    const async = pendingAsyncWaits.get(message.tag);
+    if (async) {
+      pendingAsyncWaits.delete(message.tag);
+      async.resolve(message.payload === undefined ? null : message.payload);
+      return;
+    }
+    // 老的回调式 waitForUpdate
+    const handler = pendingReplies.get(message.tag);
+    if (handler) {
+      pendingReplies.delete(message.tag);
+      handler(message);
+    }
   } else if (message.tag !== undefined) {
     // 其余带 tag 的回执（listTools / execute / wait / getService / callService）。
     const handler = pendingReplies.get(message.tag);
@@ -392,6 +476,12 @@ function dispatch(message) {
 
 function deliverResponse(payload) {
   if (payload === null || typeof payload !== "object") {
+    return;
+  }
+  const resolver = asyncResponseHandlers.get(payload.request_id);
+  if (resolver) {
+    asyncResponseHandlers.delete(payload.request_id);
+    resolver(payload);
     return;
   }
   const handler = responseHandlers.get(payload.request_id);
@@ -428,7 +518,7 @@ function run() {
  * 否则带过滤器的第二条订阅会在不该响的时候响），以及**没见过的 handle/tag
  * 不能把脚本搞挂**。
  */
-function selfTest() {
+async function selfTest() {
   const seen = [];
   handlers.clear();
   handlers.set(1, [(payload) => seen.push(["a", payload])]);
@@ -553,6 +643,32 @@ function selfTest() {
   const cycled = canonicalize(loop);
   assert(cycled["@type"] === "loop" && cycled.items[0] === loop, cycled);
 
+  // invokeAsync / waitAsync：回调协议的 Promise 包装。
+  const pending = invokeAsync("getMe", {});
+  const asyncTag = [...pendingAsyncInvokes.keys()].pop();
+  dispatch({ op: "invoked", tag: asyncTag, request_id: 123 });
+  deliverResponse({ request_id: 123, "@type": "user", id: 7 });
+  const response = await pending;
+  assert(response["@type"] === "user" && response.id === 7, response);
+
+  const waiting = waitAsync({ "@type": "updateNewMessage" }, 10);
+  const waitTag = [...pendingAsyncWaits.keys()].pop();
+  dispatch({ op: "wait", tag: waitTag, payload: { "@type": "updateNewMessage", id: 9 } });
+  const update = await waiting;
+  assert(update && update["@type"] === "updateNewMessage" && update.id === 9, update);
+
+  // 宿主拒绝请求 → reject（不是永远 pending）。
+  const failing = invokeAsync("noSuchMethod", {});
+  const failingTag = [...pendingAsyncInvokes.keys()].pop();
+  dispatch({ op: "error", tag: failingTag, message: "没有这个方法" });
+  let rejected = false;
+  try {
+    await failing;
+  } catch (error) {
+    rejected = String(error.message).includes("没有这个方法");
+  }
+  assert(rejected, "宿主拒绝时 invokeAsync 必须 reject");
+
   console.log("fuyubot_plugin: self-test ok");
 }
 
@@ -592,6 +708,7 @@ module.exports = {
   on,
   off,
   invoke,
+  invokeAsync,
   emit,
   registerTool,
   callTool,
@@ -599,6 +716,7 @@ module.exports = {
   tdExecute,
   useMiddleware,
   waitForUpdate,
+  waitAsync,
   getService,
   callService,
   config: runtimeConfig,
@@ -609,5 +727,8 @@ module.exports = {
 };
 
 if (require.main === module) {
-  selfTest();
+  selfTest().catch((error) => {
+    console.error("fuyubot_plugin: self-test FAILED", error);
+    process.exit(1);
+  });
 }

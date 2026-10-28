@@ -103,6 +103,19 @@ export declare function invoke<M extends string>(
     : Handler,
 ): number;
 
+/**
+ * `invoke` 的 `await` 版：发请求并等它自己的响应。
+ *
+ * 插件作者首选这个。TDLib 的业务错误（`@type: "error"`）也会 resolve，
+ * 自己判 `response["@type"]`；宿主拒绝请求时才 reject。
+ */
+export declare function invokeAsync<M extends string>(
+  method: M,
+  params?: M extends keyof TdFunctionMap
+    ? TdInput<TdFunctionMap[M]["params"]>
+    : { [key: string]: Json },
+): Promise<M extends keyof TdFunctionMap ? TdFunctionMap[M]["result"] : Json>;
+
 /** 宿主 `HostApiVTable::emit`。 */
 export declare function emit(event: string, payload?: Json): void;
 
@@ -149,6 +162,16 @@ export declare function waitForUpdate(
   timeoutMs: number,
   onMatch?: (payload: Json) => void,
 ): number;
+
+/**
+ * `waitForUpdate` 的 `await` 版：等一条匹配的更新。
+ *
+ * `null` = 超时/取消。底层仍由宿主在独立线程上阻塞等待，脚本事件循环照常跑。
+ */
+export declare function waitAsync(
+  filter: { [key: string]: Json },
+  timeoutMs: number,
+): Promise<Json | null>;
 
 /** 宿主 `HostApiVTable::get_service`：读服务的元数据（名字 + 方法列表）。 */
 export declare function getService(
