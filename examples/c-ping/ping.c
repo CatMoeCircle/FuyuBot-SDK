@@ -4,10 +4,16 @@
  * 这是「C 插件作者最短的一条闭环」：`plugin_init` 拿 VTable → `plugin_start` 订阅
  * → 回调里判正文 → 经 VTable 发请求。
  *
- * 编译：`fuyubot build-plugin --lang c`（它会把 cbindgen 生成的
- * `fuyubot_plugin.h` 落到本目录再调 C 编译器）。
+ * 另外它还导出了 ABI v4 的 `plugin_manifest`（自描述）——宿主在 `plugin_init`
+ * **之前**读它，用来决定激活顺序。本示例不声明依赖（两个列表留空），
+ * 否则会一直等一个不存在的服务。
+ *
+ * 编译：两步——先 `fuyubot-sdk codegen --lang c --dir .` 把 cbindgen 生成的头文件
+ * 刷新到本目录，再用你自己的 C 工具链编（`cc -shared -fPIC` / `cl /LD`）。
+ * 运行时 CLI 里**没有** `build-plugin`（2026 拆掉了），它不替你编译。
  */
 #include <stdio.h>
+#include <stdlib.h> /* malloc / free / strtoll */
 #include <string.h>
 
 #include "fuyubot_plugin.h"
@@ -88,6 +94,28 @@ FUYUBOT_EXPORT PluginHandle plugin_init(const HostApiVTable *host) {
     return handle;
 }
 
+/*
+ * 自描述（ABI v4）：宿主在 plugin_init **之前**读它，决定要不要激活、排哪。
+ *
+ * **每次调用都新开一块堆内存**：宿主读完会调 plugin_free_string 还回来。返回静态
+ * 字符串的话，那边一旦真的 free 就是未定义行为（见头文件「内存所有权」第 5 条）。
+ *
+ * 要声明依赖就把两个列表填上，例如
+ *   "inject":["storage.mongo"], "soft_inject":["media.ffmpeg"]
+ * 硬依赖缺了不激活，软依赖缺了照常加载、有了优先排前面。
+ */
+FUYUBOT_EXPORT const char *plugin_manifest(void) {
+    static const char BODY[] =
+        "{\"name\":\"fuyubot.example.ping\",\"version\":\"0.1.0\","
+        "\"inject\":[],\"soft_inject\":[]}";
+    char *copy = (char *)malloc(sizeof(BODY));
+    if (copy == NULL) {
+        return NULL; /* 宿主把 NULL 当成「没有元数据」，退回读配置段。 */
+    }
+    memcpy(copy, BODY, sizeof(BODY)); /* sizeof 含结尾 NUL */
+    return copy;
+}
+
 FUYUBOT_EXPORT int32_t plugin_start(PluginHandle handle, const char *config_json) {
     (void)config_json;
     if (handle.context == NULL || g_host == NULL) {
@@ -105,6 +133,7 @@ FUYUBOT_EXPORT void plugin_stop(PluginHandle handle) {
 }
 
 FUYUBOT_EXPORT void plugin_free_string(char *ptr) {
-    /* 本插件不往外送字符串；留着是为了满足 ABI（宿主可能调它）。 */
-    (void)ptr;
+    /* 必须**真的**释放：plugin_manifest 返回的那块是本插件 malloc 的，
+       宿主按契约还回来。free(NULL) 是合法空操作。 */
+    free(ptr);
 }

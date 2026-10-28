@@ -366,6 +366,38 @@ mod tests {
         assert!(header.contains("FUYUBOT_EXPORT PluginHandle plugin_init"));
     }
 
+    /// 示例里的 `plugin_manifest` 不能退化：它们是插件作者抄的「最短闭环」，
+    /// 少了它等于告诉所有人「v4 的自描述可写可不写」。
+    ///
+    /// 只做文本断言——本机没有 C 工具链（`docs/gaps.md` 缺口 20），真编译得靠
+    /// `fuyubot build-plugin`。所以这里钉的是「源码里有没有」，不是「能不能编」。
+    #[test]
+    fn the_c_and_go_examples_ship_a_manifest() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("仓库根");
+        for (example, name) in [("c-ping", "ping.c"), ("go-ping", "plugin.c")] {
+            let path = root.join("examples").join(example).join(name);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("读不了 {}: {e}", path.display()));
+            let at = format!("examples/{example}/{name}");
+
+            assert!(source.contains("plugin_manifest"), "{at} 少了自描述导出");
+            // malloc 是必需的：返回静态字符串、宿主又真 free，就是 UB。
+            assert!(source.contains("malloc"), "{at} 的 manifest 必须新分配内存");
+            assert!(
+                source.contains("#include <stdlib.h>"),
+                "{at} 缺 <stdlib.h>（malloc / free / strtoll）"
+            );
+            assert!(
+                !source.contains("(void)ptr;"),
+                "{at} 的 free_string 还是空实现"
+            );
+            assert!(source.contains("free(ptr)"), "{at}");
+        }
+    }
+
     /// C / C++ 模板必须自带 ABI v4 的自描述，而且 `plugin_free_string` 要**真的能释放**：
     /// 宿主拿到 `plugin_manifest` 的指针后会无条件调它，空实现就是每次加载漏一段。
     #[test]

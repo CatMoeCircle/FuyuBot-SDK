@@ -1,10 +1,15 @@
 /*
- * go-ping 的 ABI 薄壳：四个导出符号在这里，逻辑全在 main.go。
+ * go-ping 的 ABI 薄壳：导出符号在这里，逻辑全在 main.go。
  *
  * 编译：cgo 会把本文件和 main.go 一起编（`go build -buildmode=c-shared`），
  * `_cgo_export.h` 是 cgo 生成的，用来在 C 里调 Go 的 `go_on_update` 等函数。
+ *
+ * ABI v4 起还可以导出 `plugin_manifest`（自描述）。本示例导出了它，但没有声明
+ * 依赖——Go 的 c-shared 插件不能卸载（AGENTS 约束 50），拿它当服务提供者本来
+ * 就有硬边界，依赖语义留给真正需要的插件。
  */
 #include <stdint.h>
+#include <stdlib.h> /* malloc / free */
 #include <string.h>
 
 #include "fuyubot_plugin.h"
@@ -38,7 +43,7 @@ static int32_t on_update(void *user_data, const char *payload) {
     return (int32_t)go_on_update(user_data, (char *)payload);
 }
 
-/* ---- 四个 ABI 符号 ------------------------------------------------------- */
+/* ---- 导出的 ABI 符号 ----------------------------------------------------- */
 
 FUYUBOT_EXPORT PluginHandle plugin_init(const HostApiVTable *host) {
     PluginHandle failed = {0, 0, NULL, NULL};
@@ -53,6 +58,24 @@ FUYUBOT_EXPORT PluginHandle plugin_init(const HostApiVTable *host) {
         "fuyubot.example.go-ping",
     };
     return handle;
+}
+
+/*
+ * 自描述（ABI v4）：宿主在 plugin_init **之前**读它。
+ *
+ * **每次调用都新开一块堆内存**：宿主读完会调 plugin_free_string 还回来，
+ * 所以不能返回静态字符串。
+ */
+FUYUBOT_EXPORT const char *plugin_manifest(void) {
+    static const char BODY[] =
+        "{\"name\":\"fuyubot.example.go-ping\",\"version\":\"0.1.0\","
+        "\"inject\":[],\"soft_inject\":[]}";
+    char *copy = (char *)malloc(sizeof(BODY));
+    if (copy == NULL) {
+        return NULL;
+    }
+    memcpy(copy, BODY, sizeof(BODY)); /* sizeof 含结尾 NUL */
+    return copy;
 }
 
 FUYUBOT_EXPORT int32_t plugin_start(PluginHandle handle, const char *config_json) {
@@ -75,5 +98,6 @@ FUYUBOT_EXPORT void plugin_stop(PluginHandle handle) {
 }
 
 FUYUBOT_EXPORT void plugin_free_string(char *ptr) {
-    (void)ptr;
+    /* 真的释放：plugin_manifest 返回的那块是本插件 malloc 的。 */
+    free(ptr);
 }
