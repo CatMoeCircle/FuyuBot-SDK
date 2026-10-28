@@ -1914,6 +1914,8 @@ mod tests {
             log: Some(stub_log),
             get_config: Some(stub_get_config),
             set_config: Some(stub_set_config),
+            // ABI 0.1.1 的尾部字段：测试里和 provide_service 用同一个桩。
+            provide_service_shared: Some(stub_provide),
         }));
         // SAFETY: vtable 刚泄漏，活到进程结束。
         unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能构造")

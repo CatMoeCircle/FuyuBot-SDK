@@ -19,9 +19,10 @@ repository = "https://github.com/CatMoeCircle/FuyuBot-SDK"
 # `fuyubot-abi` 的**首次公开版本就是 0.1.0**，里面已经带着 `plugin_manifest` 的
 # 真实版本号（`CARGO_PKG_VERSION`）与 JSON 转义；更早的 `version` 硬编码
 # `"0.0.0"` 只是内部迭代，从未发布过。
+# ⚠️ `0.1.1` 起 VTable 多了 `provide_service_shared`（服务作用域），要用它就得 ≥0.1.1。
 # 联调本地改动时用 `[patch.crates-io]` 临时指路，**别把 patch 提交进来**（AGENTS #51）。
-fuyubot-abi = "0.1.0"
-fuyubot-tdlib-sys = "0.1.0"
+fuyubot-abi = "0.1.1"
+fuyubot-tdlib-sys = "0.1.1"
 fuyubot-plugin-api = { path = "crates/fuyubot-plugin-api", version = "0.1.1" }
 fuyubot-sdk-script = { path = "crates/fuyubot-sdk-script", version = "0.1.1" }
 fuyubot-sdk-cli = { path = "crates/fuyubot-sdk-cli", version = "0.1.1" }

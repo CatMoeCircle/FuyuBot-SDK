@@ -380,6 +380,9 @@ mod tests {
                 log: Some(log),
                 get_config: Some(get_config),
                 set_config: Some(set_config),
+                // ABI 0.1.1 的尾部字段：测试里和 provide_service 用同一个桩，
+                // 因为这两条路在测试替身里都不该被调到。
+                provide_service_shared: Some(provide),
             }));
             // SAFETY: vtable 是 Box::leak 出来的，地址稳定且布局正确。
             unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能被解包")
