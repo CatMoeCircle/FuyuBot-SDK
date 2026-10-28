@@ -30,7 +30,7 @@
 //! | `{"op":"invoke","tag":2,"method":"sendMessage","params":{...}}` | 发 TDLib 请求 | `{"op":"invoked","tag":2,"request_id":R}` |
 //! | `{"op":"emit","event":"x","payload":{...}}` | 发一条自定义事件 | 无 |
 //! | `{"op":"tool","descriptor":{...}}` | 登记工具元数据 | `{"op":"tool","tag":n,"handle":N}` |
-//! | `{"op":"callTool","tag":n,"name":"x","input":{...}}` | 调用工具（异步） | `{"op":"invoked","tag":n,"request_id":R}` |
+//! | `{"op":"callTool","tag":n,"name":"x","input":{...}}` | 同步调用工具（结果当场返回） | `{"op":"toolResult","tag":n,"output":{...}}` |
 //! | `{"op":"listTools","tag":n}` | 列出全部工具元数据（同步） | `{"op":"listTools","tag":n,"tools":[...]}` |
 //! | `{"op":"execute","tag":n,"request":{...}}` | 同步执行不碰网络的 TDLib 方法 | `{"op":"execute","tag":n,"result":{...}}` |
 //! | `{"op":"middleware","tag":n,"stage":N}` | 挂中间件（`stage` 0..5） | `{"op":"middleware","tag":n,"handle":N}` |
@@ -391,7 +391,7 @@ impl Shared {
                     .get("descriptor")
                     .map(Value::to_string)
                     .unwrap_or_else(|| "{}".to_owned());
-                let handle = self.host.register_tool(&descriptor);
+                let handle = self.host.register_tool_meta(&descriptor);
                 if handle.is_valid() {
                     self.reply(tag, "tool", json!({ "handle": handle.id }));
                 } else {
@@ -408,8 +408,11 @@ impl Shared {
                     .get("input")
                     .map(Value::to_string)
                     .unwrap_or_else(|| "{}".to_owned());
-                match self.host.call_tool(name, &input) {
-                    Ok(request) => self.reply(tag, "invoked", json!({ "request_id": request.id })),
+                match self.host.call_tool_result(name, &input) {
+                    Ok(text) => {
+                        let output: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                        self.reply(tag, "toolResult", json!({ "output": output }));
+                    }
                     Err(e) => self.fail(tag, &format!("callTool {name} 失败: {e}")),
                 }
             }
@@ -1062,6 +1065,8 @@ mod tests {
     unsafe extern "C" fn register_tool(
         host: *mut c_void,
         _descriptor: *const c_char,
+        _handler: Option<fuyubot_plugin_api::ToolHandlerFn>,
+        _user_data: *mut c_void,
     ) -> fuyubot_plugin_api::ToolHandle {
         // SAFETY: 同上。
         unsafe { host_of(host) }
@@ -1093,10 +1098,36 @@ mod tests {
             .push((name, input));
         fuyubot_plugin_api::RequestId { id: 88 }
     }
+
+    /// 同步工具结果：记下调用并返回 `{"ok":true}`。
+    unsafe extern "C" fn call_tool_result(
+        host: *mut c_void,
+        name: *const c_char,
+        input: *const c_char,
+    ) -> *const c_char {
+        // SAFETY: 同上。
+        let name = unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned();
+        let input = unsafe { CStr::from_ptr(input) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .tool_calls
+            .lock()
+            .unwrap()
+            .push((name, input));
+        static RESULT: &[u8] = b"{\"ok\":true}\0";
+        RESULT.as_ptr() as *const c_char
+    }
     unsafe extern "C" fn list_tools(_h: *mut c_void) -> *const c_char {
         // 返回一个静态的 JSON 数组（宿主线程局部缓冲的简化版）。
         static TOOLS: &[u8] = b"[{\"name\":\"demo\"}]\0";
         TOOLS.as_ptr() as *const c_char
+    }
+    unsafe extern "C" fn list_plugins(_h: *mut c_void) -> *const c_char {
+        core::ptr::null()
     }
     unsafe extern "C" fn provide(
         _h: *mut c_void,
@@ -1209,7 +1240,9 @@ mod tests {
             emit: Some(emit),
             register_tool: Some(register_tool),
             call_tool: Some(call_tool),
+            call_tool_result: Some(call_tool_result),
             list_tools: Some(list_tools),
+            list_plugins: Some(list_plugins),
             provide_service: Some(provide),
             get_service: Some(get),
             td_invoke: Some(td),
@@ -1314,7 +1347,7 @@ mod tests {
     fn tool_and_execute_ops_reach_the_host() {
         let (shared, sink, fake) = shared();
 
-        // callTool：异步，走 response 通道，回 `invoked`。
+        // callTool：同步，当场回结果。
         shared.handle_line(r#"{"op":"callTool","tag":10,"name":"demo","input":{"x":1}}"#);
         // listTools：同步，回工具列表。
         shared.handle_line(r#"{"op":"listTools","tag":11}"#);
@@ -1332,7 +1365,7 @@ mod tests {
         assert!(
             written
                 .iter()
-                .any(|line| line.contains("\"op\":\"invoked\"") && line.contains("\"tag\":10")),
+                .any(|line| line.contains("\"op\":\"toolResult\"") && line.contains("\"tag\":10")),
             "{written:?}"
         );
         assert!(

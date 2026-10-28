@@ -635,7 +635,7 @@ impl Shared {
                     .get("descriptor")
                     .map(Value::to_string)
                     .unwrap_or_else(|| "{}".to_owned());
-                let handle = self.host.register_tool(&descriptor);
+                let handle = self.host.register_tool_meta(&descriptor);
                 if handle.is_valid() {
                     self.reply(tag, "tool", json!({ "handle": handle.id }));
                 } else {
@@ -652,8 +652,11 @@ impl Shared {
                     .get("input")
                     .map(Value::to_string)
                     .unwrap_or_else(|| "{}".to_owned());
-                match self.host.call_tool(name, &input) {
-                    Ok(request) => self.reply(tag, "invoked", json!({ "request_id": request.id })),
+                match self.host.call_tool_result(name, &input) {
+                    Ok(text) => {
+                        let output: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                        self.reply(tag, "toolResult", json!({ "output": output }));
+                    }
                     Err(e) => self.fail(tag, &format!("callTool {name} 失败: {e}")),
                 }
             }
@@ -1795,6 +1798,8 @@ mod tests {
     unsafe extern "C" fn stub_tool(
         _h: *mut core::ffi::c_void,
         _d: *const core::ffi::c_char,
+        _handler: Option<fuyubot_plugin_api::ToolHandlerFn>,
+        _u: *mut core::ffi::c_void,
     ) -> fuyubot_plugin_api::ToolHandle {
         fuyubot_plugin_api::ToolHandle::INVALID
     }
@@ -1806,6 +1811,16 @@ mod tests {
         fuyubot_plugin_api::RequestId::INVALID
     }
     unsafe extern "C" fn stub_list_tools(_h: *mut core::ffi::c_void) -> *const core::ffi::c_char {
+        core::ptr::null()
+    }
+    unsafe extern "C" fn stub_call_tool_result(
+        _h: *mut core::ffi::c_void,
+        _n: *const core::ffi::c_char,
+        _i: *const core::ffi::c_char,
+    ) -> *const core::ffi::c_char {
+        core::ptr::null()
+    }
+    unsafe extern "C" fn stub_list_plugins(_h: *mut core::ffi::c_void) -> *const core::ffi::c_char {
         core::ptr::null()
     }
     unsafe extern "C" fn stub_provide(
@@ -1885,7 +1900,9 @@ mod tests {
             emit: Some(stub_emit),
             register_tool: Some(stub_tool),
             call_tool: Some(stub_call_tool),
+            call_tool_result: Some(stub_call_tool_result),
             list_tools: Some(stub_list_tools),
+            list_plugins: Some(stub_list_plugins),
             provide_service: Some(stub_provide),
             get_service: Some(fake_get_service),
             td_invoke: Some(stub_td),

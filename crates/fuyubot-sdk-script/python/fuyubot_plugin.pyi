@@ -73,7 +73,7 @@ def call_tool(
     input: Optional[Dict[str, Any]] = None,
     on_response: Optional[Handler] = None,
 ) -> int:
-    """宿主 `HostApiVTable::call_tool`：异步调用一个工具。"""
+    """同步调用一个工具；`on_response` 收到工具输出 JSON（失败时是 `{"error": …}`）。"""
     ...
 
 def list_tools(on_tools: Optional[Callable[[List[Any]], None]] = None) -> int:

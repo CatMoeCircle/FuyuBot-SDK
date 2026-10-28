@@ -179,12 +179,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `check` 要看的四个 ABI 符号，顺序即输出顺序。
-const ABI_SYMBOLS: [&[u8]; 4] = [
+/// `check` 要看的 ABI 符号，顺序即输出顺序。
+///
+/// 前四个是 v3 就有的插件契约；后两个是 v4 新增的**静态导出**（只检查“有没有导出”，
+/// 值仍然只能运行时从 `plugin_init` 的 `PluginHandle.abi_version` 判定——见 AGENTS #44）。
+const ABI_SYMBOLS: [&[u8]; 6] = [
     fuyubot_abi::SYM_PLUGIN_INIT,
     fuyubot_abi::SYM_PLUGIN_START,
     fuyubot_abi::SYM_PLUGIN_STOP,
     fuyubot_abi::SYM_PLUGIN_FREE_STRING,
+    fuyubot_abi::SYM_PLUGIN_ABI_VERSION,
+    fuyubot_abi::SYM_PLUGIN_MANIFEST,
 ];
 
 /// 一个字面量符号的检查结果。
@@ -296,7 +301,7 @@ fn find_companion(dll: &Path) -> Option<PathBuf> {
 /// **不加载、不运行**（规格要求）：走 `object` 直接解析文件里的导出表，
 /// 而不是 dlopen 之后再 dlsym——dlopen 会在宿主进程里跑插件的初始化代码。
 ///
-/// 能看：文件是不是动态库、什么格式/架构、四个契约符号导出了哪些、有没有同伴脚本。
+/// 能看：文件是不是动态库、什么格式/架构、契约符号导出了哪些（v3 四件套 + v4 两个静态导出）、有没有同伴脚本。
 /// **看不了**：`PluginHandle.abi_version`（那是返回值，不是符号），以及任何行为。
 fn check(path: &Path) -> Result<CheckReport, String> {
     let data = std::fs::read(path).map_err(|e| format!("读不了 {}: {e}", path.display()))?;
@@ -495,7 +500,7 @@ mod tests {
         assert!(method_names(Some("zzz-nothing")).is_empty());
     }
 
-    /// `check` 要能在一个**真的编出来的 cdylib** 上认出四个符号。
+    /// `check` 要能在一个**真的编出来的 cdylib** 上认出六类符号（v3 四件套 + v4 两个静态导出）。
     ///
     /// 自己调 `cargo build` 把 fixture 建出来（和 `fuyubot-loader/tests/plugins.rs` 一个路子），
     /// 这样 `cargo test -p fuyubot-sdk-cli` 单独跑也自洽，不依赖「先跑过全量构建」。

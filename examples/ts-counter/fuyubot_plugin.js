@@ -212,13 +212,13 @@ function registerTool(name, description = "", inputSchema) {
 }
 
 /**
- * 调用一个工具（异步）。响应按 `request_id` 配对，`onResponse` 收到的是
- * 工具执行的最终结果（`ToolResponse` 的 JSON）。
+ * 调用一个工具。结果是**当场返回**的（走宿主的同步 `call_tool_result`），
+ * `onResponse` 收到工具输出 JSON；失败时是 `{"error": "…"}`。
  */
 function callTool(name, input, onResponse) {
   const tag = newTag();
   if (typeof onResponse === "function") {
-    pendingInvokes.set(tag, onResponse);
+    pendingReplies.set(tag, (msg) => onResponse(msg.output));
   }
   send({ op: "callTool", tag, name, input: input || {} });
   return tag;

@@ -126,7 +126,7 @@ export declare function registerTool(
   inputSchema?: { [key: string]: Json },
 ): void;
 
-/** 宿主 `HostApiVTable::call_tool`：异步调用一个工具。 */
+/** 同步调用一个工具；`onResponse` 收到工具输出 JSON（失败时是 `{"error": …}`）。 */
 export declare function callTool(
   name: string,
   input?: { [key: string]: Json },

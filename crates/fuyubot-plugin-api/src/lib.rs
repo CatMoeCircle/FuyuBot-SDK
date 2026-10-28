@@ -9,6 +9,9 @@
 //!   收发（而不是每次手拼 JSON 字符串）；
 //! - [`wait_for_update_json`](HostExt::wait_for_update_json)：把「只在下一次宿主调用前有效」
 //!   的临时指针**当场**拷成 `Value`，不给插件作者留悬垂指针的机会；
+//! - [`call_tool_value`](HostExt::call_tool_value)：同步工具调用 + 结果解析（工具结果回投）；
+//! - 重导出 `ResponseRouter` / `ResponseFuture` / `UpdateFuture`：插件作者可以直接
+//!   `router.invoke(..).await` / `router.wait_for_update(..).await`（无需再单独依赖 abi）；
 //! - [`SDK_ABI_VERSION`] / [`is_compatible`]：本 SDK 声明的兼容 ABI 版本，
 //!   宿主加载时会拿它与 [`HostApiVTable::version`] 比（见 `fuyubot-loader`）。
 //!
@@ -40,8 +43,9 @@ pub use fuyubot_abi::{
     ABI_VERSION, AbiError, EventCallbackFn, FILTER_EVENT_TYPE_KEY, HostApi, HostApiVTable,
     LogLevel, MiddlewareCallbackFn, MiddlewareHandle, PLUGIN_HEADER, Plugin, PluginFreeStringFn,
     PluginHandle, PluginInitFn, PluginStartFn, PluginStopFn, RESPONSE_EVENT, RequestId,
-    ServiceHandle, ServiceMethod, ServiceMethodFn, ServiceVTable, Stage, SubscriptionHandle,
-    ToolHandle, UPDATE_EVENT, WaitHandle, define_plugin,
+    ResponseFuture, ResponseRouter, ServiceHandle, ServiceMethod, ServiceMethodFn, ServiceVTable,
+    Stage, SubscriptionHandle, ToolHandle, ToolHandlerFn, UPDATE_EVENT, UpdateFuture, WaitHandle,
+    define_plugin,
 };
 
 /// 本 SDK 声明兼容的宿主 ABI 版本。
@@ -134,6 +138,12 @@ pub trait HostExt {
     /// 返回 `None` 表示超时或被取消。
     fn wait_for_update_json(&self, filter: Value, timeout_ms: u64) -> Option<Value>;
 
+    /// **同步**调用工具并返回结果（工具结果回投）。
+    ///
+    /// 与 [`HostApi::call_tool`] 的区别：那个只回请求号、结果没有回投通道；这个当场
+    /// 执行并解析结果。工具失败时返回 `{"error": "…"}`，由调用方判断。
+    fn call_tool_value(&self, name: &str, input: Value) -> Result<Value, AbiError>;
+
     /// 读全局配置的一个段 / 键，把宿主的 JSON 缓冲当场解析成 [`Value`]。
     ///
     /// `section` 是插件段名（如 `"fuyubot.manage"`，点分插件名会当点路径下钻）；
@@ -193,6 +203,14 @@ impl HostExt for HostApi {
         Some(unsafe { parse_payload(handle.payload_json) })
     }
 
+    fn call_tool_value(&self, name: &str, input: Value) -> Result<Value, AbiError> {
+        let text = self.call_tool_result(name, &input.to_string())?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|_| AbiError::BadString)
+    }
+
     fn config_value(&self, section: &str, key: &str) -> Option<Value> {
         let text = self.get_config(section, key)?;
         serde_json::from_str(&text).ok()
@@ -248,7 +266,12 @@ mod tests {
         unsafe extern "C" fn emit(_h: *mut c_void, _t: *const c_char, _p: *const c_char) -> i32 {
             0
         }
-        unsafe extern "C" fn register_tool(_h: *mut c_void, _d: *const c_char) -> ToolHandle {
+        unsafe extern "C" fn register_tool(
+            _h: *mut c_void,
+            _d: *const c_char,
+            _handler: Option<fuyubot_abi::ToolHandlerFn>,
+            _ud: *mut c_void,
+        ) -> ToolHandle {
             ToolHandle::INVALID
         }
         unsafe extern "C" fn call_tool(
@@ -258,7 +281,18 @@ mod tests {
         ) -> RequestId {
             RequestId::INVALID
         }
+        unsafe extern "C" fn call_tool_result(
+            _h: *mut c_void,
+            _n: *const c_char,
+            _i: *const c_char,
+        ) -> *const c_char {
+            static BODY: &[u8] = b"{\"ok\":true}\0";
+            BODY.as_ptr() as *const c_char
+        }
         unsafe extern "C" fn list_tools(_h: *mut c_void) -> *const c_char {
+            core::ptr::null()
+        }
+        unsafe extern "C" fn list_plugins(_h: *mut c_void) -> *const c_char {
             core::ptr::null()
         }
         unsafe extern "C" fn provide(
@@ -332,7 +366,9 @@ mod tests {
                 emit: Some(emit),
                 register_tool: Some(register_tool),
                 call_tool: Some(call_tool),
+                call_tool_result: Some(call_tool_result),
                 list_tools: Some(list_tools),
+                list_plugins: Some(list_plugins),
                 provide_service: Some(provide),
                 get_service: Some(get),
                 td_invoke: Some(td),

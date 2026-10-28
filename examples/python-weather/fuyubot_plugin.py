@@ -162,10 +162,11 @@ def register_tool(name, description="", input_schema=None):
 
 
 def call_tool(name, input=None, on_response=None):
-    """异步调用一个工具。响应按 `request_id` 配对，`on_response` 收到执行结果。"""
+    """调用一个工具。结果是**当场返回**的（宿主的同步 `call_tool_result`），
+    `on_response` 收到工具输出 JSON；失败时是 `{"error": …}`。"""
     tag = _new_tag()
     if on_response is not None:
-        _pending_invokes[tag] = on_response
+        _pending_replies[tag] = lambda msg: on_response(msg.get("output"))
     _send({"op": "callTool", "tag": tag, "name": name, "input": input or {}})
     return tag
 
