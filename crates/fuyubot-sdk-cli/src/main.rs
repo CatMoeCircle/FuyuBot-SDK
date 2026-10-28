@@ -181,13 +181,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `check` 要看的 ABI 符号，顺序即输出顺序。
 ///
-/// 前四个是 v3 就有的插件契约；后两个是 v4 新增的**静态导出**（只检查“有没有导出”，
-/// 值仍然只能运行时从 `plugin_init` 的 `PluginHandle.abi_version` 判定——见 AGENTS #44）。
-const ABI_SYMBOLS: [&[u8]; 6] = [
+/// 前四个是 v3 就有的插件契约；后三个是 v4 新增的**静态导出**（只检查「有没有导出」）。
+/// 静态能看到的只有「有没有这个符号」，插件**声明**的 ABI 版本仍然只能运行时从
+/// `plugin_init` 的 `PluginHandle.abi_version` 判定——见 AGENTS #44。
+const ABI_SYMBOLS: [&[u8]; 7] = [
     fuyubot_abi::SYM_PLUGIN_INIT,
     fuyubot_abi::SYM_PLUGIN_START,
     fuyubot_abi::SYM_PLUGIN_STOP,
     fuyubot_abi::SYM_PLUGIN_FREE_STRING,
+    fuyubot_abi::SYM_PLUGIN_FREE_HANDLE,
     fuyubot_abi::SYM_PLUGIN_ABI_VERSION,
     fuyubot_abi::SYM_PLUGIN_MANIFEST,
 ];
@@ -255,10 +257,15 @@ impl CheckReport {
             out.push_str(line_text.trim_end());
             out.push('\n');
         }
-        // 版本只能运行时看：它是 plugin_init 的返回值，不是静态符号。
+        // 版本有三个，别混：宿主的 ABI 世代、插件声明的 ABI 版本（运行期才看得到）、
+        // 以及插件自己的 crate 版本（在 manifest 里）。
         out.push_str(&format!(
-            "ABI 版本：宿主是 {}。插件报的版本**只能运行时判定**——它在 `PluginHandle.abi_version`\n\
-             \x20   里，是 `plugin_init` 的返回值，不是静态符号（见 docs/abi-contract.md）。\n",
+            "ABI 版本：宿主是 {}。三个版本别混：\n\
+             \x20   - 宿主 ABI 世代 = 这个数（`HostApiVTable::version` 就在首字段）；\n\
+             \x20   - 插件声明的 ABI 版本在 `PluginHandle::abi_version`，是 `plugin_init`\n\
+             \x20     的返回值——**装载时才判定**，静态检查看不到；\n\
+             \x20   - 插件自己的 crate 版本在 `plugin_manifest` 的 `version` 字段里。\n\
+             \x20   细节见 docs/abi-contract.md。\n",
             fuyubot_abi::ABI_VERSION
         ));
         out.push_str(if self.loadable() {

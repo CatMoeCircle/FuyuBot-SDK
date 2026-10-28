@@ -366,6 +366,46 @@ mod tests {
         assert!(header.contains("FUYUBOT_EXPORT PluginHandle plugin_init"));
     }
 
+    /// C / C++ 模板必须自带 ABI v4 的自描述，而且 `plugin_free_string` 要**真的能释放**：
+    /// 宿主拿到 `plugin_manifest` 的指针后会无条件调它，空实现就是每次加载漏一段。
+    #[test]
+    fn the_c_templates_ship_a_real_manifest() {
+        for (lang, file, stdlib) in [
+            (Lang::C, "ping.c", "#include <stdlib.h>"),
+            (Lang::Cpp, "ping.cpp", "#include <cstdlib>"),
+        ] {
+            let root = temp(&format!("manifest-tpl-{}", lang.as_str()));
+            let dir = new_plugin(&root, "ping", lang).unwrap();
+            let source = std::fs::read_to_string(dir.join(file)).unwrap();
+
+            assert!(
+                source.contains("plugin_manifest"),
+                "{} 模板少了自描述导出：\n{source}",
+                lang.as_str()
+            );
+            // malloc 是必需的：返回静态字符串的话宿主一 free 就是未定义行为。
+            assert!(
+                source.contains("malloc"),
+                "{} 模板的 manifest 必须新分配一块内存",
+                lang.as_str()
+            );
+            assert!(
+                source.contains(stdlib),
+                "{} 模板缺 {stdlib}（malloc / free 的声明在里头）",
+                lang.as_str()
+            );
+            // 空实现 + 堆上返回值 = 每次加载漏一段。
+            assert!(
+                !source.contains("(void)ptr;"),
+                "{} 模板的 plugin_free_string 还是空实现",
+                lang.as_str()
+            );
+            assert!(source.contains("free(ptr)"), "{}", lang.as_str());
+            // 占位符没替换完的话，宿主看到的插件名就是 `__NAME__`。
+            assert!(!source.contains("__NAME__"), "{}", lang.as_str());
+        }
+    }
+
     #[test]
     fn every_language_writes_something() {
         for (lang, expected) in [

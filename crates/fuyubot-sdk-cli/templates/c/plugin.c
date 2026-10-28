@@ -5,8 +5,14 @@
  * 由 `fuyubot-sdk init --lang c` 生成；用你自己的工具链编它（`gcc -shared` / `cl /LD`）。
  *
  * 编译时头文件 `fuyubot_plugin.h` 就在本目录（`fuyubot-sdk init` 写出来的）。
+ *
+ * ABI v4 起插件可以导出七个符号：v3 的四件套（init / start / stop / free_string）
+ * 之外多了 `plugin_manifest`（自描述，宿主**在 init 之前**读它来定依赖顺序）、
+ * `fuyubot_abi_version`（静态报 ABI 版本）与 `plugin_free_handle`（版本不匹配时
+ * 释放 init 分配的状态）。本模板给出前两个里最有用的那个：manifest。
  */
 #include <stdio.h>
+#include <stdlib.h> /* malloc / free / strtoll */
 #include <string.h>
 
 #include "fuyubot_plugin.h"
@@ -84,6 +90,32 @@ FUYUBOT_EXPORT PluginHandle plugin_init(const HostApiVTable *host) {
     return handle;
 }
 
+/* 版本：报给宿主的就是它。换成你自己的版本号。 */
+#define PLUGIN_VERSION "0.1.0"
+
+/*
+ * 自描述（ABI v4）：宿主在 plugin_init **之前**读它，用来决定要不要激活。
+ *
+ * 两个列表就是依赖声明：`inject` 是硬依赖（缺了不激活），`soft_inject` 是软依赖
+ * （缺了照常加载，有了优先排前面）。留空 = 不声明，宿主退回读配置段
+ * `[plugin.<名字>].inject`。
+ *
+ * **每次调用都新开一块堆内存**：宿主读完会调本库的 `plugin_free_string` 还回来。
+ * 返回静态字符串的话，那边一旦真的 free 就是未定义行为（见头文件「内存所有权」
+ * 第 5 条）。所以这里一律 malloc + memcpy。
+ */
+FUYUBOT_EXPORT const char *plugin_manifest(void) {
+    static const char BODY[] =
+        "{\"name\":\"__NAME__\",\"version\":\"" PLUGIN_VERSION "\","
+        "\"inject\":[],\"soft_inject\":[]}";
+    char *copy = (char *)malloc(sizeof(BODY));
+    if (copy == NULL) {
+        return NULL; /* 宿主把 NULL 当成「没有元数据」，退回读配置。 */
+    }
+    memcpy(copy, BODY, sizeof(BODY)); /* sizeof 含结尾 NUL */
+    return copy;
+}
+
 FUYUBOT_EXPORT int32_t plugin_start(PluginHandle handle, const char *config_json) {
     (void)config_json;
     if (handle.context == NULL || g_host == NULL) {
@@ -101,6 +133,7 @@ FUYUBOT_EXPORT void plugin_stop(PluginHandle handle) {
 }
 
 FUYUBOT_EXPORT void plugin_free_string(char *ptr) {
-    /* 本插件不往外送字符串；留着是为了满足 ABI（宿主可能调它）。 */
-    (void)ptr;
+    /* 必须**真的**释放：manifest 是本插件 malloc 的，宿主按契约还回来。
+       free(NULL) 是合法空操作，不用额外判空。 */
+    free(ptr);
 }
