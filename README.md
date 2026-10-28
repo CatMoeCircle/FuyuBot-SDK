@@ -15,6 +15,11 @@
 `fuyubot-abi` 与 `fuyubot-tdlib-sys` 是**运行时仓库**的 crate（`fuyubot-sdk` 只用它们做
 `td-methods` 查询），从 crates.io 拉；所以本仓库构建前，bot 仓库得先把它们发上去。
 
+`fuyubot-sdk-cli` **不发 crates.io**（所以 `cargo install` 装不到）：它的 `include_str!`
+跨 crate 引用了 `fuyubot-sdk-script/python/` 下的桥文件——「模板与绑定只有一份来源」那条
+约束的代价。打包成独立 crate 后那个相对路径不存在，verify 必然失败。所以 `fuyubot-sdk`
+命令只从 Release 的 zip 装。
+
 ## 构建与自检
 
 ```bash
