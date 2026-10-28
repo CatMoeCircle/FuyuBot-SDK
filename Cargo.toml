@@ -15,6 +15,11 @@ repository = "https://github.com/CatMoeCircle/FuyuBot-SDK"
 # （https://github.com/CatMoeCircle/Fuyu-Bot）的 crate，从 crates.io 拉。
 # 发布顺序：bot 仓库先发这两个 → 本仓库才能发 fuyubot-plugin-api / fuyubot-sdk-script。
 [workspace.dependencies]
+# 写 `0.1.0` 是有意的：`^0.1.0` 会拿到最新的 0.1.x，不必每次跟着改。
+# `fuyubot-abi` 的**首次公开版本就是 0.1.0**，里面已经带着 `plugin_manifest` 的
+# 真实版本号（`CARGO_PKG_VERSION`）与 JSON 转义；更早的 `version` 硬编码
+# `"0.0.0"` 只是内部迭代，从未发布过。
+# 联调本地改动时用 `[patch.crates-io]` 临时指路，**别把 patch 提交进来**（AGENTS #51）。
 fuyubot-abi = "0.1.0"
 fuyubot-tdlib-sys = "0.1.0"
 fuyubot-plugin-api = { path = "crates/fuyubot-plugin-api", version = "0.1.1" }

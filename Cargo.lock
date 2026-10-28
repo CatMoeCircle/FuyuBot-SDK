@@ -181,7 +181,9 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fuyubot-abi"
-version = "0.1.1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee0f1d5734f6124aa9701a63402a11493b4e8f3c51023ec2f2020ae21ebb0346"
 dependencies = [
  "cbindgen",
  "serde_json",
@@ -279,7 +281,9 @@ dependencies = [
 
 [[package]]
 name = "fuyubot-tdlib-sys"
-version = "0.1.1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6207f4132816c7de4d2917fdf3f50dbff635e158a0ae1d6195bbd70270256d4"
 dependencies = [
  "serde",
  "serde_json",
