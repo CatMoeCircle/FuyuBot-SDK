@@ -889,13 +889,41 @@ pub mod __macro_support {
 
 /// 插件的全部代码就是这一行。
 ///
+/// 四种写法，依赖列表可选；两个都要给时**`inject` 必须写在 `soft_inject` 前面**
+/// （反过来没有任何规则能匹配，编译期就会报错）：
+///
 /// ```ignore
+/// // 1. 不声明依赖：宿主按配置段 `[plugin.<名字>].inject` 决定
 /// fuyubot_sdk_script::script_plugin!("fuyubot.python.weather", python, "weather.py");
-/// fuyubot_sdk_script::script_plugin!("fuyubot.js.hello", js, "hello.js");
+/// // 2. 只声明硬依赖：缺了不激活
+/// fuyubot_sdk_script::script_plugin!("fuyubot.js.hello", js, "hello.js",
+///     inject = ["storage.mongo"]);
+/// // 3. 只声明软依赖：缺了照常加载，有了优先排前面
+/// fuyubot_sdk_script::script_plugin!("fuyubot.py.media", python, "media.py",
+///     soft_inject = ["media.ffmpeg"]);
+/// // 4. 两个都给
+/// fuyubot_sdk_script::script_plugin!("fuyubot.py.both", python, "both.py",
+///     inject = ["a.b"], soft_inject = ["c.d"]);
 /// ```
+///
+/// 依赖会写进 ABI v4 的 `plugin_manifest`，宿主在 `plugin_init` **之前**就读得到
+/// （那时脚本还没起，所以依赖只能是**编译期字面量**，不能写在 `.py` / `.js` 里）。
+///
+/// 为什么依赖要显式枚举 8 条规则、而不是一条带 `$(...)?` 的：可选片段在**转录侧**
+/// 也得镜像一层 `$($($d),*)?`，嵌套重复深度一错就是 `still repeating at this depth`；
+/// 而且顺序写反时可选片段版本只报「no rules expected `,`」，显式版本会把所有可行
+/// 形状列出来。多 16 行换「一眼可核对」。
 #[macro_export]
 macro_rules! script_plugin {
-    (@build $name:literal, $runtime:expr, $script:literal) => {
+    // ── 内部：真正干活的那一条 ──────────────────────────────────────────
+    //
+    // 依赖在这里只有一种形状（两个 `[...]`），所以嵌套重复只出现在这一处；
+    // 下面 8 条公开规则各自把「可选」规范化成 `[deps] / []` 再转进来。
+    //
+    // `define_plugin!` 全文只在这里出现一次 ——「一个 crate 只能展开一次」
+    // 是**结构性**成立的，不靠约定。
+    (@build $name:literal, $runtime:expr, $script:literal,
+            [$($dep:literal),*], [$($soft:literal),*]) => {
         /// 脚本插件：逻辑在 `.py` / `.js` 里，这里只有 ABI 胶水。
         struct ScriptPlugin($crate::Bridge);
 
@@ -911,17 +939,57 @@ macro_rules! script_plugin {
             fn stop(&mut self) {
                 self.0.stop();
             }
+
+            /// 硬依赖：缺了不激活。写进 `plugin_manifest`。
+            fn inject() -> Vec<String> {
+                ::std::vec![$(::std::string::String::from($dep)),*]
+            }
+
+            /// 软依赖：缺了照常加载，有了优先排前面。写进 `plugin_manifest`。
+            fn soft_inject() -> Vec<String> {
+                ::std::vec![$(::std::string::String::from($soft)),*]
+            }
         }
 
         $crate::__macro_support::define_plugin!(ScriptPlugin, $name);
     };
 
+    // ── 公开形态：python × 4 ────────────────────────────────────────────
     ($name:literal, python, $script:literal) => {
-        $crate::script_plugin!(@build $name, $crate::Runtime::Python, $script);
+        $crate::script_plugin!(@build $name, $crate::Runtime::Python, $script, [], []);
     };
 
+    ($name:literal, python, $script:literal, inject = [$($dep:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Python, $script, [$($dep),*], []);
+    };
+
+    ($name:literal, python, $script:literal, soft_inject = [$($soft:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Python, $script, [], [$($soft),*]);
+    };
+
+    ($name:literal, python, $script:literal,
+            inject = [$($dep:literal),*], soft_inject = [$($soft:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Python, $script,
+            [$($dep),*], [$($soft),*]);
+    };
+
+    // ── 公开形态：js × 4（同形，只换 Runtime）────────────────────────────
     ($name:literal, js, $script:literal) => {
-        $crate::script_plugin!(@build $name, $crate::Runtime::Node, $script);
+        $crate::script_plugin!(@build $name, $crate::Runtime::Node, $script, [], []);
+    };
+
+    ($name:literal, js, $script:literal, inject = [$($dep:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Node, $script, [$($dep),*], []);
+    };
+
+    ($name:literal, js, $script:literal, soft_inject = [$($soft:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Node, $script, [], [$($soft),*]);
+    };
+
+    ($name:literal, js, $script:literal,
+            inject = [$($dep:literal),*], soft_inject = [$($soft:literal),*]) => {
+        $crate::script_plugin!(@build $name, $crate::Runtime::Node, $script,
+            [$($dep),*], [$($soft),*]);
     };
 }
 
