@@ -205,6 +205,8 @@ struct CheckReport {
     kind: String,
     is_dynamic: bool,
     symbols: Vec<SymbolLine>,
+    /// 与动态库同目录同名的脚本（`.py` / `.js` / `.ts`）。纯原生插件是 `None`。
+    companion: Option<PathBuf>,
 }
 
 impl CheckReport {
@@ -224,6 +226,10 @@ impl CheckReport {
             "格式：{} / {} / {}\n",
             self.format, self.architecture, self.kind
         ));
+        out.push_str(&match &self.companion {
+            Some(script) => format!("同伴脚本：{}\n", script.display()),
+            None => "同伴脚本：无（按纯原生插件加载）\n".to_owned(),
+        });
         if !self.is_dynamic {
             out.push_str(
                 "  !!  这不是动态库——宿主只加载 cdylib（`.dll` / `.so` / `.dylib`）。\n\
@@ -259,12 +265,38 @@ impl CheckReport {
     }
 }
 
+/// 脚本插件同伴文件的扩展名与顺序——与宿主 `fuyubot_loader::find_script` **同一约定**。
+///
+/// 两个仓共享不了这份代码（本 CLI 只依赖已发布的 `fuyubot-abi` / `fuyubot-tdlib-sys`），
+/// 所以这里有一份；宿主侧那份在 `fuyubot-loader/src/script.rs`。两边各有测试钉住同一张表，
+/// 改约定必须两边一起改（gaps 28）。
+const SCRIPT_EXTENSIONS: [&str; 3] = ["py", "js", "ts"];
+
+/// 找与 cdylib 同目录、同主干的脚本（`.py` / `.js` / `.ts`）。
+///
+/// cargo 在类 Unix 上给 cdylib 加 `lib` 前缀，两种都试；同类文件同时存在时
+/// 按 [`SCRIPT_EXTENSIONS`] 的顺序取第一个——与宿主加载时选的是同一个。
+fn find_companion(dll: &Path) -> Option<PathBuf> {
+    let dir = dll.parent()?;
+    let stem = dll.file_stem()?.to_string_lossy().into_owned();
+    let bare = stem.strip_prefix("lib").unwrap_or(&stem).to_owned();
+    for candidate in [stem, bare] {
+        for extension in SCRIPT_EXTENSIONS {
+            let path = dir.join(format!("{candidate}.{extension}"));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// 静态检查一个插件产物。
 ///
 /// **不加载、不运行**（规格要求）：走 `object` 直接解析文件里的导出表，
 /// 而不是 dlopen 之后再 dlsym——dlopen 会在宿主进程里跑插件的初始化代码。
 ///
-/// 能看：文件是不是动态库、什么格式/架构、四个契约符号导出了哪些。
+/// 能看：文件是不是动态库、什么格式/架构、四个契约符号导出了哪些、有没有同伴脚本。
 /// **看不了**：`PluginHandle.abi_version`（那是返回值，不是符号），以及任何行为。
 fn check(path: &Path) -> Result<CheckReport, String> {
     let data = std::fs::read(path).map_err(|e| format!("读不了 {}: {e}", path.display()))?;
@@ -303,6 +335,7 @@ fn check(path: &Path) -> Result<CheckReport, String> {
         kind: format!("{:?}", file.kind()),
         is_dynamic: file.kind() == ObjectKind::Dynamic,
         symbols,
+        companion: find_companion(path),
     })
 }
 
@@ -512,6 +545,16 @@ mod tests {
         let report = check(&artifact).unwrap();
         assert!(report.is_dynamic, "kind = {}", report.kind);
         assert!(report.loadable(), "{}", report.render());
+        assert!(
+            report.companion.is_none(),
+            "纯 Rust 示例没有同伴脚本：{:?}",
+            report.companion
+        );
+        assert!(
+            report.render().contains("同伴脚本：无"),
+            "{}",
+            report.render()
+        );
         for line in &report.symbols {
             assert!(line.present, "{} 没被认出来", line.name);
         }
@@ -540,5 +583,37 @@ mod tests {
         std::fs::write(&garbage, b"definitely not a library").unwrap();
         let error = check(&garbage).unwrap_err();
         assert!(error.contains("不是能识别的目标文件"), "{error}");
+    }
+
+    /// 缺口 28：`check` 要看得到与 cdylib 同目录同名的脚本。
+    ///
+    /// 规则与宿主 `fuyubot_loader::find_script` 一致：`lib` 前缀、`.py` → `.js` → `.ts`。
+    #[test]
+    fn companion_script_lookup_matches_the_host() {
+        let dir = crate::test_support::temp("check-companion");
+        let dll = dir.join("counter.dll");
+        std::fs::write(&dll, b"not a real dll").unwrap();
+        assert_eq!(find_companion(&dll), None);
+
+        std::fs::write(dir.join("counter.ts"), b"export {}").unwrap();
+        assert_eq!(
+            find_companion(&dll).unwrap().file_name().unwrap(),
+            "counter.ts"
+        );
+        // `.js` 优先于 `.ts`——宿主加载时挑的也是 js。
+        std::fs::write(dir.join("counter.js"), b"// js").unwrap();
+        assert_eq!(
+            find_companion(&dll).unwrap().file_name().unwrap(),
+            "counter.js"
+        );
+
+        // 类 Unix 的产物带 `lib` 前缀，同伴脚本按去掉前缀后的名字找。
+        let lib = dir.join("libweather.so");
+        std::fs::write(&lib, b"not a real dll").unwrap();
+        std::fs::write(dir.join("weather.py"), b"print()").unwrap();
+        assert_eq!(
+            find_companion(&lib).unwrap().file_name().unwrap(),
+            "weather.py"
+        );
     }
 }

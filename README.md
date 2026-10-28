@@ -35,7 +35,7 @@ export FUYUBOT_TDLIB_VENDORED_CACHE=/path/to/Fuyu-Bot/.tdlib-cache
 ```bash
 fuyubot-sdk init mybot --lang rust      # 生成 <插件工程>/
 fuyubot-sdk codegen --lang c --dir <工程> # 刷 C 头文件
-fuyubot-sdk check path/to/plugin.dll    # 不加载、不运行，只读导出符号
+fuyubot-sdk check path/to/plugin.dll    # 不加载、不运行，只读导出符号与同伴脚本
 ```
 
 模板里依赖写的是 crates.io 版本；想在本地对着 SDK 源码开发就设 `FUYUBOT_SDK_PATH`
