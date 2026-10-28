@@ -369,8 +369,9 @@ mod tests {
     /// 示例里的 `plugin_manifest` 不能退化：它们是插件作者抄的「最短闭环」，
     /// 少了它等于告诉所有人「v4 的自描述可写可不写」。
     ///
-    /// 只做文本断言——本机没有 C 工具链（`docs/gaps.md` 缺口 20），真编译得靠
-    /// `fuyubot build-plugin`。所以这里钉的是「源码里有没有」，不是「能不能编」。
+    /// 只做文本断言——本机没有 C 工具链（`docs/gaps.md` 缺口 20），真编译得先
+    /// `codegen` 刷头文件、再自己调编译器。所以这里钉的是「源码里有没有」，
+    /// 不是「能不能编」。
     #[test]
     fn the_c_and_go_examples_ship_a_manifest() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
