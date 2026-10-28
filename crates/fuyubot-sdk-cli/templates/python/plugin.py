@@ -3,7 +3,8 @@
 逻辑都写在这里。`fuyubot_plugin` 是桥（由 `fuyubot-sdk init` 一起放在本目录），
 它把宿主的能力包成了普通函数，类型声明见同目录的 `fuyubot_plugin.pyi`。
 
-跑起来的方式：`fuyubot build-plugin` 编出 cdylib，`fuyubot run` 加载它，
+跑起来的方式：在本工程目录 `cargo build` 编出 cdylib（胶水在 `src/lib.rs`，一行
+`script_plugin!`），再 `fuyubot plugin install <工程目录>` + `fuyubot run` 加载它，
 宿主会替你启动 python 解释器执行本文件。也可以直接 `python __SCRIPT__` 调试，
 只是没有宿主可说话。
 """
