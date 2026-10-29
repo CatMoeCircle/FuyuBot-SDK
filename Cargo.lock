@@ -182,6 +182,8 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 [[package]]
 name = "fuyubot-abi"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14a48ffe8390424fcbf5d9e7d5a191e9a276a7328c2934a44ebe9865414e1840"
 dependencies = [
  "cbindgen",
  "serde_json",
