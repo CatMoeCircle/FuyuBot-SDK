@@ -281,9 +281,9 @@ dependencies = [
 
 [[package]]
 name = "fuyubot-tdlib-sys"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97b6aaca7acddbdffa7a97405821f04e4ac1ce4b443dde6c6567dcab666e615a"
+checksum = "e66bec7c03c79b36b5d80c9c147e02a37f13b6889b46b6eef6f870cde7df5228"
 dependencies = [
  "serde",
  "serde_json",
