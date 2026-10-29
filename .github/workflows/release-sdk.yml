@@ -107,9 +107,9 @@ jobs:
             "| 资产 |" \
             "| --- |" \
             "$rows")
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.zip --clobber
-            gh release edit "$TAG" --notes "$notes"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --notes "$notes" --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" dist/*.zip --title "fuyubot-sdk $TAG" --notes "$notes"
+            gh release create "$TAG" dist/*.zip --title "fuyubot-sdk $TAG" --notes "$notes" --repo "$GITHUB_REPOSITORY"
           fi
