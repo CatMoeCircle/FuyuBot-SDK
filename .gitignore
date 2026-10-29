@@ -28,3 +28,7 @@ examples/*/target/
 .DS_Store
 Thumbs.db
 *.swp
+
+# ── Python 缓存 ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]

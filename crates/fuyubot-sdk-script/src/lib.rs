@@ -375,6 +375,26 @@ impl Shared {
                 }
             }
 
+            "simplify_invoke" => {
+                let request = value.get("request").cloned().unwrap_or(Value::Null);
+                match self.host.simplify_invoke_json(request) {
+                    Ok(request_id) => self.reply(
+                        tag,
+                        "simplify_invoked",
+                        json!({ "request_id": request_id.id }),
+                    ),
+                    Err(e) => self.fail(tag, &format!("simplify_invoke 失败: {e}")),
+                }
+            }
+
+            "simplify_invoke_result" => {
+                let request = value.get("request").cloned().unwrap_or(Value::Null);
+                match self.host.simplify_invoke_result_json(request) {
+                    Ok(result) => self.reply(tag, "simplifyResult", result),
+                    Err(e) => self.fail(tag, &format!("simplify_invoke_result 失败: {e}")),
+                }
+            }
+
             "emit" => {
                 let event = value.get("event").and_then(Value::as_str).unwrap_or("");
                 let payload = value
@@ -1014,6 +1034,8 @@ mod tests {
         tool_calls: Mutex<Vec<(String, String)>>,
         /// `execute`（同步 TDLib）收到的请求，以及要返回的结果（可空）。
         executes: Mutex<Vec<String>>,
+        /// `simplify_invoke` 收到的 op JSON（v5 起宿主替插件跑 simplify 操作）。
+        simplifies: Mutex<Vec<String>>,
         /// `use_middleware` 收到的阶段；回调也存起来供 `fire_middleware` 用。
         middleware: Mutex<
             Vec<(
@@ -1294,6 +1316,31 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn simplify(
+        host: *mut c_void,
+        op_json: *const c_char,
+    ) -> fuyubot_plugin_api::RequestId {
+        // SAFETY: ABI 契约保证是 NUL 结尾字符串。
+        let op_json = unsafe { CStr::from_ptr(op_json) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: 同上。
+        unsafe { host_of(host) }
+            .simplifies
+            .lock()
+            .unwrap()
+            .push(op_json);
+        fuyubot_plugin_api::RequestId::INVALID
+    }
+    unsafe extern "C" fn simplify_result(
+        _host: *mut c_void,
+        _op_json: *const c_char,
+    ) -> *const c_char {
+        // 静态 JSON（宿主线程局部缓冲的简化版）。测试替身不会真的跑 op。
+        static RESULT: &[u8] = b"{\"@type\":\"simplifyResult\",\"ok\":true}\0";
+        RESULT.as_ptr() as *const c_char
+    }
+
     type VTable = fuyubot_plugin_api::HostApiVTable;
 
     /// 造一份假 VTable + 它背后的 `FakeHost`（返回的 Arc 要一直拿住）。
@@ -1324,6 +1371,9 @@ mod tests {
             set_config: Some(set_config),
             // ABI 0.1.1 的尾部字段：测试里和 provide_service 用同一个桩。
             provide_service_shared: Some(provide),
+            // ABI 0.1.2（v5）的尾部字段：simplify 下沉到宿主后新增的两个入口。
+            simplify_invoke: Some(simplify),
+            simplify_invoke_result: Some(simplify_result),
         }));
         // SAFETY: vtable 是 Box::leak 出来的，布局与 ABI 契约一致。
         let api = unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能被解包");

@@ -5,7 +5,7 @@ default-members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -20,19 +20,26 @@ repository = "https://github.com/CatMoeCircle/FuyuBot-SDK"
 # 真实版本号（`CARGO_PKG_VERSION`）与 JSON 转义；更早的 `version` 硬编码
 # `"0.0.0"` 只是内部迭代，从未发布过。
 # ⚠️ `0.1.1` 起 VTable 多了 `provide_service_shared`（服务作用域），要用它就得 ≥0.1.1。
+# ⚠️ `0.1.2` 起又多了 `simplify_invoke` / `simplify_invoke_result`（ABI 4 → 5）。
 # 联调本地改动时用 `[patch.crates-io]` 临时指路，**别把 patch 提交进来**（AGENTS #51）。
-fuyubot-abi = "0.1.1"
+fuyubot-abi = "0.1.2"
 fuyubot-tdlib-sys = "0.1.1"
-fuyubot-plugin-api = { path = "crates/fuyubot-plugin-api", version = "0.1.1" }
-fuyubot-sdk-script = { path = "crates/fuyubot-sdk-script", version = "0.1.1" }
-fuyubot-sdk-cli = { path = "crates/fuyubot-sdk-cli", version = "0.1.1" }
-fuyubot-sdk-native = { path = "crates/fuyubot-sdk-native", version = "0.1.1" }
-fuyubot-sdk-host = { path = "crates/fuyubot-sdk-host", version = "0.1.1" }
+fuyubot-plugin-api = { path = "crates/fuyubot-plugin-api", version = "0.1.2" }
+fuyubot-sdk-script = { path = "crates/fuyubot-sdk-script", version = "0.1.2" }
+fuyubot-sdk-cli = { path = "crates/fuyubot-sdk-cli", version = "0.1.2" }
+fuyubot-sdk-native = { path = "crates/fuyubot-sdk-native", version = "0.1.2" }
+fuyubot-sdk-host = { path = "crates/fuyubot-sdk-host", version = "0.1.2" }
 
 clap = { version = "4.6.7", features = ["derive"] }
 # 只用来**静态**读动态库的导出符号（`fuyubot-sdk check`）：不加载、不运行。
 object = { version = "0.40.0", default-features = false, features = ["read", "names", "std"] }
 serde_json = "1.0.151"
+
+# ⚠️⚠️ 临时：指到**本地**的 fuyubot-abi（0.1.2 / ABI v5，尚未发布到 crates.io）。
+# 只为联调验证「SDK 侧补的两个新 VTable 字段能编过」。
+# **发布前必须整节删掉**（AGENTS #51），否则 crates.io 上的用户会解析到一个不存在的路径。
+[patch.crates-io]
+fuyubot-abi = { path = "../FuyuBot/crates/fuyubot-abi" }
 
 [profile.debug]
 inherits = "dev"

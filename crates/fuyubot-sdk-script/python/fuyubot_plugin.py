@@ -148,6 +148,48 @@ def invoke_async(method, params=None):
     return future
 
 
+def simplify_invoke(op, on_response=None):
+    """让宿主跑一个 **simplify 操作**（发消息等结局、超时撤回、bot 与用户号挑不同反应
+    方法、Markdown → entities、富消息本地块树……）。结果照 `@request_id` 回投到
+    `response` 通道（负载 `@type == "simplifyResult"`），和 `invoke` 的响应走同一套
+    配对机制——所以 `on_response` 拿到的就是那条 `simplifyResult`。
+
+    给了 `on_response` 就在这条操作的结果回来时调它；否则只发不收。
+    """
+    _ensure_response_channel()
+    tag = _new_tag()
+    if on_response is not None:
+        _pending_invokes[tag] = on_response
+    _send({"op": "simplify_invoke", "tag": tag, "request": op or {}})
+    return tag
+
+
+def simplify_invoke_async(op):
+    """`simplify_invoke` 的 `await` 版：发操作并等它的 `simplifyResult`。
+    resolve 的是整条 `simplifyResult`（`{ok, op, result|error}`），自己判 `ok`。
+    只能在 `run_async` 的事件循环里调。
+    """
+    loop = asyncio.get_running_loop()
+    _ensure_response_channel()
+    tag = _new_tag()
+    future = loop.create_future()
+    _pending_async_invokes[tag] = future
+    _send({"op": "simplify_invoke", "tag": tag, "request": op or {}})
+    return future
+
+
+def simplify_invoke_result(op, on_result=None):
+    """**同步**跑一个不碰网络的 simplify 操作（`parse_text_entities` / `rich_from_markdown`
+    / `list_ops`），当场返回结果。回调里也能调。传需要等 TDLib 应答的异步 op 会拿到
+    `ok:false` / `code:"async_op"`。
+    """
+    tag = _new_tag()
+    if on_result is not None:
+        _pending_replies[tag] = on_result
+    _send({"op": "simplify_invoke_result", "tag": tag, "request": op or {}})
+    return tag
+
+
 def emit(event, payload=None):
     """发一条自定义事件（其他插件订阅得到）。"""
     _send({"op": "emit", "event": event, "payload": payload})
@@ -320,6 +362,16 @@ def _dispatch(message):
         if handler is not None:
             _middleware_handlers.setdefault(message.get("handle"), []).append(handler)
     elif op == "invoked":
+        future = _pending_async_invokes.pop(message.get("tag"), None)
+        if future is not None:
+            if not future.done():
+                _async_response_futures[message.get("request_id")] = future
+            return
+        handler = _pending_invokes.pop(message.get("tag"), None)
+        if handler is not None:
+            _response_handlers[message.get("request_id")] = handler
+    elif op == "simplify_invoked":
+        # 与 invoked 同构：tag → request_id，响应按 request_id 配对回投。
         future = _pending_async_invokes.pop(message.get("tag"), None)
         if future is not None:
             if not future.done():

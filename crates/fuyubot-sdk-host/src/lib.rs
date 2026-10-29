@@ -1889,6 +1889,18 @@ mod tests {
     ) -> i32 {
         0
     }
+    unsafe extern "C" fn stub_simplify(
+        _h: *mut core::ffi::c_void,
+        _o: *const core::ffi::c_char,
+    ) -> fuyubot_plugin_api::RequestId {
+        fuyubot_plugin_api::RequestId::INVALID
+    }
+    unsafe extern "C" fn stub_simplify_result(
+        _h: *mut core::ffi::c_void,
+        _o: *const core::ffi::c_char,
+    ) -> *const core::ffi::c_char {
+        core::ptr::null()
+    }
 
     fn fake_api() -> HostApi {
         let vtable: &'static HostApiVTable = Box::leak(Box::new(HostApiVTable {
@@ -1916,6 +1928,9 @@ mod tests {
             set_config: Some(stub_set_config),
             // ABI 0.1.1 的尾部字段：测试里和 provide_service 用同一个桩。
             provide_service_shared: Some(stub_provide),
+            // ABI 0.1.2（v5）的尾部字段：simplify 下沉到宿主后新增的两个入口。
+            simplify_invoke: Some(stub_simplify),
+            simplify_invoke_result: Some(stub_simplify_result),
         }));
         // SAFETY: vtable 刚泄漏，活到进程结束。
         unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能构造")

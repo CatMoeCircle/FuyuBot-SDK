@@ -1,4 +1,4 @@
-# 插件 ABI 契约（ABI v4）
+# 插件 ABI 契约（ABI v5）
 
 > **权威源只有一处**：`fuyubot-abi/src/lib.rs`（运行时仓库）。C 头文件
 > `fuyubot_plugin.h` 是它的**产物**（cbindgen + `build.rs` 里三段手写契约），
@@ -100,8 +100,8 @@
 
 ## 5. `HostApiVTable` 一览
 
-`{ version: u32, size: u32, host_ctx, ...19 个函数指针 }`。每个函数**首参都是
-`host_ctx`**，每个字段都是 `Option<fn>`（C 侧是可能为空的函数指针，**必须判空**）。
+`{ version: u32, size: u32, host_ctx, ...22 个函数指针 }`（v5；v4 是 20 个）。每个函数
+**首参都是 `host_ctx`**，每个字段都是 `Option<fn>`（C 侧是可能为空的函数指针，**必须判空**）。
 
 | 组 | 字段 | 说明 |
 |---|---|---|
@@ -112,8 +112,16 @@
 | 管线 | `use_middleware` | 插到六阶段管线的某个 stage |
 | 等待 | `wait_for_update` / `cancel_wait` | **阻塞**当前线程；异步形态见 `ResponseRouter`（Rust 侧） |
 | 诊断 | `log` / `get_config` / `set_config` / `list_plugins` | `get_config` 能读任意段，`set_config` 只能写自己那段（宿主按 `owner_names` 判定，插件伪造不了） |
+| simplify（v5） | `simplify_invoke` / `simplify_invoke_result` | 让**宿主**替你跑一个 `fuyubot-simplify` 操作（发消息等结局、超时撤回、bot 与用户号挑不同反应方法、Markdown → entities、富消息块树）。前者异步（结果照 `@request_id` 回投到 `response` 通道），后者同步且回调里安全，只收不碰网络的 op。操作用 **op JSON** 分发：`{"op":"send_message","args":{…}}` —— **加操作不动 ABI** |
 
 逐字段的签名以 `fuyubot_plugin.h` 为准（`cbindgen` 产出，带完整注释）。
+
+### v5 的改动：simplify 下沉到宿主
+
+`fuyubot-simplify` 的语义**不再是 Rust 独享**。宿主从 v5 起自己跑同一份
+`fuyubot-simplify::ops`，经上面两个函数暴露给**所有语言**的插件。操作清单与结果形状
+（`{"@type":"simplifyResult","ok":…,"result"|"error":{"code":…}}`）见运行时仓库的
+`docs/decisions.md`（变更 12）与文档站的 ABI 页。`ABI_VERSION` 跳到 5，旧插件重新编一次即可。
 
 ### 服务作用域
 

@@ -197,6 +197,60 @@ function invokeAsync(method, params) {
   });
 }
 
+/**
+ * 让宿主跑一个 **simplify 操作**（发消息等结局、超时撤回、bot 与用户号挑不同反应
+ * 方法、Markdown → entities、富消息本地块树……）。结果照 `@request_id` 回投到
+ * `response` 通道（负载 `@type == "simplifyResult"`），和 `invoke` 的响应走同一套
+ * 配对机制——所以 `onResponse` 拿到的就是那条 `simplifyResult`。
+ *
+ * 给了 `onResponse` 就在这条操作的结果回来时调它；否则只发不收。
+ *
+ * @param {object} op simplify 的 op JSON，如 `{ op: "send_message", args: { chat_id, input_message_content } }`
+ * @param {(result: object) => void} [onResponse] 结果回调，收到整条 `simplifyResult`
+ */
+function simplifyInvoke(op, onResponse) {
+  ensureResponseChannel();
+  const tag = newTag();
+  if (typeof onResponse === "function") {
+    pendingInvokes.set(tag, onResponse);
+  }
+  send({ op: "simplify_invoke", tag, request: canonicalize(op || {}) });
+  return tag;
+}
+
+/**
+ * `simplifyInvoke` 的 `await` 版：发操作并等它的 `simplifyResult`。
+ * Promise resolve 的是整条 `simplifyResult`（`{ ok, op, result|error }`），自己判 `ok`。
+ *
+ * @param {object} op simplify 的 op JSON
+ * @returns {Promise<object>}
+ */
+function simplifyInvokeAsync(op) {
+  ensureResponseChannel();
+  const tag = newTag();
+  return new Promise((resolve, reject) => {
+    pendingAsyncInvokes.set(tag, { resolve, reject });
+    send({ op: "simplify_invoke", tag, request: canonicalize(op || {}) });
+  });
+}
+
+/**
+ * **同步**跑一个不碰网络的 simplify 操作（`parse_text_entities` / `rich_from_markdown` /
+ * `list_ops`），当场返回结果。回调里也能调。传需要等 TDLib 应答的异步 op 会拿到
+ * `ok:false` / `code:"async_op"`。
+ *
+ * @param {object} op simplify 的 op JSON
+ * @param {(result: object) => void} [onResult] 结果回调，收到整条 `simplifyResult`
+ */
+function simplifyInvokeResult(op, onResult) {
+  const tag = newTag();
+  if (typeof onResult === "function") {
+    pendingReplies.set(tag, onResult);
+  }
+  send({ op: "simplify_invoke_result", tag, request: canonicalize(op || {}) });
+  return tag;
+}
+
 /** 发一条自定义事件（其他插件订阅得到）。 */
 function emit(event, payload) {
   send({ op: "emit", event, payload });
@@ -424,6 +478,19 @@ function dispatch(message) {
       middlewareHandlers.get(message.handle).push(handler);
     }
   } else if (message.op === "invoked") {
+    const async = pendingAsyncInvokes.get(message.tag);
+    if (async) {
+      pendingAsyncInvokes.delete(message.tag);
+      asyncResponseHandlers.set(message.request_id, async.resolve);
+      return;
+    }
+    const handler = pendingInvokes.get(message.tag);
+    if (handler) {
+      pendingInvokes.delete(message.tag);
+      responseHandlers.set(message.request_id, handler);
+    }
+  } else if (message.op === "simplify_invoked") {
+    // 与 invoked 同构：把 tag 换成 request_id，响应按 request_id 配对回投。
     const async = pendingAsyncInvokes.get(message.tag);
     if (async) {
       pendingAsyncInvokes.delete(message.tag);

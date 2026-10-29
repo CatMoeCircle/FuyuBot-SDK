@@ -156,6 +156,20 @@ pub trait HostExt {
     /// 宿主按调用者身份判定归属，所以没有 section 参数——插件写不到别人的段。
     /// 成功 = 已写内存并回写 `fuyubot.toml`。
     fn set_config_value(&self, key: &str, value: Value) -> Result<(), AbiError>;
+
+    /// 让宿主跑一个 **simplify 操作**（发消息等结局、超时撤回、bot 与用户号挑不同反应
+    /// 方法、Markdown → entities、富消息本地块树……）。
+    ///
+    /// `op` 是 simplify 的 op JSON（如 `{"op":"send_message","args":{…}}`）。结果照
+    /// `@request_id` 回投到 `response` 通道，负载 `@type == "simplifyResult"`
+    /// （成功失败同形状，只看 `ok` 字段）——和 `invoke` 的响应走同一套回投 / 配对机制。
+    fn simplify_invoke_json(&self, op: Value) -> Result<RequestId, AbiError>;
+
+    /// **同步**跑一个不碰网络的 simplify 操作（回调里安全）：`parse_text_entities` /
+    /// `rich_from_markdown` / `list_ops`。返回解析后的结果 [`Value`]。
+    ///
+    /// 传需要等 TDLib 应答的异步 op 会拿到 `ok:false` / `code:"async_op"`。
+    fn simplify_invoke_result_json(&self, op: Value) -> Result<Value, AbiError>;
 }
 
 impl HostExt for HostApi {
@@ -218,6 +232,20 @@ impl HostExt for HostApi {
 
     fn set_config_value(&self, key: &str, value: Value) -> Result<(), AbiError> {
         self.set_config(key, &value.to_string())
+    }
+
+    fn simplify_invoke_json(&self, op: Value) -> Result<RequestId, AbiError> {
+        let op = if op.is_object() { op.to_string() } else { "{}".to_owned() };
+        self.simplify_invoke(&op)
+    }
+
+    fn simplify_invoke_result_json(&self, op: Value) -> Result<Value, AbiError> {
+        let op = if op.is_object() { op.to_string() } else { "{}".to_owned() };
+        let text = self.simplify_invoke_result(&op);
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|_| AbiError::BadString)
     }
 }
 
@@ -327,6 +355,13 @@ mod tests {
             WaitHandle::INVALID
         }
         unsafe extern "C" fn cancel(_h: *mut c_void, _w: WaitHandle) {}
+        unsafe extern "C" fn simplify(_h: *mut c_void, _o: *const c_char) -> RequestId {
+            RequestId::INVALID
+        }
+        unsafe extern "C" fn simplify_result(_h: *mut c_void, _o: *const c_char) -> *const c_char {
+            static BODY: &[u8] = b"{\"@type\":\"simplifyResult\",\"ok\":true}\0";
+            BODY.as_ptr() as *const c_char
+        }
         unsafe extern "C" fn execute(_h: *mut c_void, _r: *const c_char) -> *const c_char {
             core::ptr::null()
         }
@@ -383,6 +418,10 @@ mod tests {
                 // ABI 0.1.1 的尾部字段：测试里和 provide_service 用同一个桩，
                 // 因为这两条路在测试替身里都不该被调到。
                 provide_service_shared: Some(provide),
+                // ABI 0.1.2（v5）的尾部字段：simplify 下沉到宿主后新增的两个入口。
+                // 同样只是填坑——测试替身不该真的跑 simplify 操作。
+                simplify_invoke: Some(simplify),
+                simplify_invoke_result: Some(simplify_result),
             }));
             // SAFETY: vtable 是 Box::leak 出来的，地址稳定且布局正确。
             unsafe { HostApi::from_raw(vtable) }.expect("假宿主必须能被解包")
